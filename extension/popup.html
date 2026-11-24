@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Chat Bridge</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="top">
+    <img src="icons/icon48.png" alt="" class="logo">
+    <div>
+      <h1>Chat Bridge</h1>
+      <p id="mode-badge" class="badge">Tab to tab</p>
+    </div>
+  </header>
+
+  <!-- ================= 1. THIS TAB ================= -->
+  <section class="card">
+    <h2><span class="num">1</span> This tab</h2>
+    <p class="site" id="site-label">Reading this tab...</p>
+
+    <div class="rows">
+      <div class="row">
+        <span class="tick" id="tick-input" title="Not picked yet">○</span>
+        <span class="row-text">Chat box</span>
+        <button id="pick-input" class="small">Pick chat box</button>
+      </div>
+      <div class="row">
+        <span class="tick" id="tick-send" title="Not picked yet">○</span>
+        <span class="row-text">Send button <em>(optional)</em></span>
+        <button id="pick-send" class="small">Pick send button</button>
+      </div>
+      <div class="row">
+        <span class="tick" id="tick-reply" title="Not picked yet">○</span>
+        <span class="row-text">AI reply</span>
+        <button id="pick-reply" class="small">Pick AI reply</button>
+      </div>
+    </div>
+
+    <div class="button-grid">
+      <button id="test-copy" class="ghost">Test copy</button>
+      <button id="test-paste" class="ghost">Test paste</button>
+      <button id="clear-picks" class="ghost danger">Clear picks</button>
+    </div>
+
+    <div class="roles">
+      <button id="make-a" class="role">Make this Tab A</button>
+      <button id="make-b" class="role">Make this Tab B</button>
+    </div>
+    <p class="hint" id="roles-line">No tabs chosen yet.</p>
+
+    <div id="test-output" class="test-output" hidden>
+      <div class="test-head">
+        <strong id="test-title">Test copy</strong>
+        <button id="test-close" class="link">close</button>
+      </div>
+      <pre id="test-text"></pre>
+    </div>
+  </section>
+
+  <!-- ================= 2. SETTINGS ================= -->
+  <section class="card">
+    <h2><span class="num">2</span> Settings</h2>
+
+    <div class="grid2">
+      <label>Rounds
+        <input id="rounds" type="number" min="1" max="100" step="1">
+      </label>
+      <label>Seconds of silence
+        <input id="silence" type="number" min="2" max="120" step="1">
+      </label>
+      <label>Copy mode A
+        <select id="copy-mode-a">
+          <option value="full">Full reply</option>
+          <option value="code">Last code block</option>
+          <option value="markers">Between markers</option>
+        </select>
+      </label>
+      <label>Copy mode B
+        <select id="copy-mode-b">
+          <option value="full">Full reply</option>
+          <option value="code">Last code block</option>
+          <option value="markers">Between markers</option>
+        </select>
+      </label>
+      <label>START marker
+        <input id="marker-start" type="text">
+      </label>
+      <label>END marker
+        <input id="marker-end" type="text">
+      </label>
+      <label>Timeout (seconds)
+        <input id="timeout" type="number" min="30" max="3600" step="10">
+      </label>
+      <label>Max rounds safety limit
+        <input id="max-rounds" type="number" min="1" max="100" step="1">
+      </label>
+    </div>
+
+    <label class="full">Prefix text (added before every forwarded message)
+      <textarea id="prefix" rows="2" placeholder="For example: Here is the other AI's answer. Improve it."></textarea>
+    </label>
+    <label class="full">Suffix text (added after every forwarded message)
+      <textarea id="suffix" rows="2" placeholder="For example: Put your next message between START and END."></textarea>
+    </label>
+
+    <label class="check">
+      <input id="stop-if-same" type="checkbox">
+      Stop if the new reply is identical to the previous one
+    </label>
+    <label class="full inline">Stop when the reply contains
+      <input id="stop-word" type="text" placeholder="DONE">
+    </label>
+
+    <hr>
+
+    <label class="full">Mode
+      <select id="mode">
+        <option value="tab">Tab to Tab (two chat tabs talk)</option>
+        <option value="api">Tab and API (chat tab talks to an AI API)</option>
+      </select>
+    </label>
+
+    <div id="api-settings" class="api-box" hidden>
+      <label class="full">Main provider
+        <select id="provider">
+          <option value="gemini">Google Gemini (backup: Grok)</option>
+          <option value="grok">xAI Grok (backup: Gemini)</option>
+        </select>
+      </label>
+      <div class="grid2">
+        <label>Gemini API key
+          <input id="gemini-key" type="password" autocomplete="off" spellcheck="false" placeholder="AIza...">
+        </label>
+        <label>Gemini model
+          <input id="gemini-model" type="text" spellcheck="false">
+        </label>
+        <label>Grok API key
+          <input id="grok-key" type="password" autocomplete="off" spellcheck="false" placeholder="xai-...">
+        </label>
+        <label>Grok model
+          <input id="grok-model" type="text" spellcheck="false">
+        </label>
+      </div>
+      <div class="grid2">
+        <label>Messages kept as memory
+          <input id="memory" type="number" min="0" max="30" step="2">
+        </label>
+      </div>
+      <label class="full">System prompt for the API (optional)
+        <textarea id="system-prompt" rows="2"
+          placeholder="You are a careful engineer. Answer clearly."></textarea>
+      </label>
+      <p class="hint">Keys stay on this computer in chrome.storage.local. They are never shown in the log.</p>
+    </div>
+  </section>
+
+  <!-- ================= 3. RUN ================= -->
+  <section class="card">
+    <h2><span class="num">3</span> Run</h2>
+    <div class="run-buttons">
+      <button id="start" class="primary">Start</button>
+      <button id="stop" class="danger">Stop</button>
+    </div>
+    <p id="status" class="status">Ready.</p>
+
+    <div class="log-head">
+      <strong>Last events</strong>
+      <button id="copy-log" class="link">Copy log</button>
+    </div>
+    <ol id="log" class="log"></ol>
+  </section>
+
+  <footer>
+    <button id="show-readme" class="link">How to use</button>
+    <span>·</span>
+    <span>Everything stays in this browser.</span>
+  </footer>
+
+  <script src="common.js"></script>
+  <script src="extract.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

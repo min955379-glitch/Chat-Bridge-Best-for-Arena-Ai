@@ -1,0 +1,12 @@
+# Dependencies for the test suite only (the extension itself needs none).
+node_modules/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Build output, if you ever zip the extension here
+*.zip
