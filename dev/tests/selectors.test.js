@@ -99,3 +99,73 @@ test('isStableClass rejects build hashes and keeps real words', () => {
     assert.equal(Selectors.isStableClass(bad), false, bad);
   }
 });
+
+// ---------- real site structures ----------
+// These mirror the markup of chat sites that change their class names often.
+
+test('ChatGPT-style page: one selector for every assistant message', () => {
+  const doc = makeDoc(
+    '<main><div class="react-scroll-to-bottom">' +
+    '<div data-message-author-role="user" data-message-id="a1"><div class="whitespace-pre-wrap">Q1</div></div>' +
+    '<div data-message-author-role="assistant" data-message-id="b1"><div class="markdown prose"><p>Answer one</p></div></div>' +
+    '<div data-message-author-role="user" data-message-id="a2"><div class="whitespace-pre-wrap">Q2</div></div>' +
+    '<div data-message-author-role="assistant" data-message-id="b2"><div class="markdown prose"><p>Answer two</p></div></div>' +
+    '</div></main>');
+  const clicked = doc.querySelector('[data-message-id="b2"] p');
+  const built = Selectors.buildSelector(clicked, 'reply', doc);
+  assert.ok(!built.error, built.error);
+  const found = doc.querySelectorAll(built.selector);
+  assert.equal(found.length, 2);
+  for (const node of found) {
+    assert.equal(node.getAttribute('data-message-author-role'), 'assistant');
+  }
+});
+
+test('Claude-style page: the reply class is found without any role attribute', () => {
+  const doc = makeDoc(
+    '<div class="grid"><div class="thread">' +
+    '<div class="font-user-message"><p>Question A</p></div>' +
+    '<div class="font-claude-message"><p>Reply A</p></div>' +
+    '<div class="font-user-message"><p>Question B</p></div>' +
+    '<div class="font-claude-message"><p>Reply B</p></div>' +
+    '</div></div>');
+  const clicked = doc.querySelectorAll('.font-claude-message')[1].querySelector('p');
+  const built = Selectors.buildSelector(clicked, 'reply', doc);
+  assert.ok(!built.error, built.error);
+  const found = Array.from(doc.querySelectorAll(built.selector));
+  assert.equal(found.length, 2);
+  assert.ok(found.every((node) => node.textContent.includes('Reply')));
+});
+
+test('Gemini-style page with custom elements (model-response)', () => {
+  const doc = makeDoc(
+    '<main><div class="conversation-container">' +
+    '<user-query><div class="query-text">Q</div></user-query>' +
+    '<model-response><div class="response-container"><message-content><p>Answer one</p></message-content></div></model-response>' +
+    '<user-query><div class="query-text">Q2</div></user-query>' +
+    '<model-response><div class="response-container"><message-content><p>Answer two</p></message-content></div></model-response>' +
+    '</div></main>');
+  const clicked = doc.querySelectorAll('model-response message-content p')[1];
+  const built = Selectors.buildSelector(clicked, 'reply', doc);
+  assert.ok(!built.error, built.error);
+  assert.equal(doc.querySelectorAll(built.selector).length, 2);
+});
+
+test('a page with only hash class names still gets a usable reply selector', () => {
+  const doc = makeDoc(
+    '<div><div id="root">' +
+    '<div class="x1y2z3"><div class="css-kfz9w"><p>Q</p></div></div>' +
+    '<div class="x1y2z3"><div class="css-kfz9w"><p>Answer one</p></div></div>' +
+    '<div class="x1y2z3"><div class="css-kfz9w"><p>Q2</p></div></div>' +
+    '<div class="x1y2z3"><div class="css-kfz9w"><p>Answer two</p></div></div>' +
+    '</div></div>');
+  const clicked = doc.querySelectorAll('p')[3];
+  const built = Selectors.buildSelector(clicked, 'reply', doc);
+  assert.ok(!built.error, built.error);
+  const found = doc.querySelectorAll(built.selector);
+  assert.ok(found.length >= 2, 'it must match more than one block: ' + built.selector);
+  assert.ok(!/css-kfz9w|x1y2z3/.test(built.selector), 'hash classes must not be used');
+  // The clicked spot must be inside the saved match.
+  const last = found[found.length - 1];
+  assert.ok(last === clicked || last.contains(clicked));
+});

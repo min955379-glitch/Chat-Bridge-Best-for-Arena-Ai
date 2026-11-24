@@ -123,6 +123,27 @@
     return inside || saved;
   }
 
+  // The text part of a reply. Sites wrap the answer in a "prose", "markdown"
+  // or "message-content" element and add avatars, buttons and timestamps
+  // around it. Reading only that part keeps the forwarded text clean.
+  const TEXT_BODY_SELECTOR = [
+    '.markdown', '.prose', '[class*="prose"]', '.message-content',
+    'message-content', '[data-message-content]', '.assistant-message',
+    '[class*="markdown"]', '[class*="response-text"]'
+  ].join(', ');
+
+  function textBodyOf(element) {
+    if (!element || typeof element.querySelector !== 'function') return element;
+    const body = element.querySelector(TEXT_BODY_SELECTOR);
+    // Only use it when it holds most of the reply, otherwise the reply is
+    // probably just a short message with a stray class name.
+    if (!body) return element;
+    const full = String(element.innerText || element.textContent || '').trim();
+    const inner = String(body.innerText || body.textContent || '').trim();
+    if (inner.length >= Math.min(20, full.length * 0.5)) return body;
+    return element;
+  }
+
   // ---------- reading a reply ----------
   // Full text of the newest reply + how many replies match + last code block.
   function readLastReply(selector) {
@@ -135,9 +156,12 @@
       };
     }
     const element = list[list.length - 1];
-    const text = Extract.cleanText(Extract.visibleText(element));
+    // Use the same element for the text and the code block, so "last code
+    // block" really means the last one in the answer that is being read.
+    const body = textBodyOf(element);
+    const text = Extract.cleanText(Extract.visibleText(body));
     let code = '';
-    const blocks = element.querySelectorAll('pre code, pre');
+    const blocks = (body || element).querySelectorAll('pre code, pre');
     if (blocks.length) {
       const last = blocks[blocks.length - 1];
       const holder = last.tagName === 'PRE' && last.querySelector('code') ? last.querySelector('code') : last;
@@ -515,6 +539,13 @@
       note = result.count === 1
         ? ' It matches 1 reply now; new replies will be found automatically.'
         : ' It matches ' + result.count + ' replies and the last one is always the newest.';
+      // If the selector also matches the user's own messages, say so, because
+      // the newest match could then be a question instead of an answer.
+      const share = Selectors.aiShareOf(result.selector, document);
+      if (result.count > 1 && share < 0.6) {
+        note += ' Warning: some of the matches look like your own messages. ' +
+          'Try picking the reply again and press Arrow Up so only the AI answers match.';
+      }
       note += ' If that is wrong, pick it again and press Arrow Up before clicking.';
     } else if (result.fallback) {
       note = ' I used a long structural selector because no stable attributes were found; ' +

@@ -317,10 +317,11 @@ npm install     # installs jsdom, only for the tests
 npm test
 ```
 
-What is covered (108 tests):
+What is covered (112 tests):
 
 * `selectors.test.js` — hash classes are rejected, replies match every answer, ids with
-  digits are ignored, the structural fallback works.
+  digits are ignored, the structural fallback works, and the builder is checked against
+  markups modelled on ChatGPT, Claude, Gemini and class-hash-only pages.
 * `extract.test.js` — the three copy modes, marker edge cases, unfinished-code detection.
 * `common.test.js` — site keys (`/c` vs `/agent`), defaults, clamping, key hiding.
 * `api-client.test.js` — request shapes for both providers, retry once, fallback, 429

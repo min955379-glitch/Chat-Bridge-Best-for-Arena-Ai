@@ -55,6 +55,19 @@
 
   function tagOf(el) { return el && el.tagName ? el.tagName.toLowerCase() : ''; }
 
+  // Some sites name the speaker in a child element instead of an attribute,
+  // for example  <span class="role">Assistant</span> inside each message.
+  // Count how many matches look like AI messages by their first words.
+  function aiLabelRatio(matches) {
+    if (!matches.length) return 0;
+    let ai = 0;
+    for (const node of matches) {
+      const start = String(node.innerText || node.textContent || '').trim().slice(0, 24).toLowerCase();
+      if (/^(assistant|ai|grok|claude|gemini|chatgpt|model|bot)\b/.test(start)) ai += 1;
+    }
+    return ai / matches.length;
+  }
+
   // Does this selector look like "the AI's messages"? Sites mark that with
   // data-message-author-role, data-role, class names like "assistant" or
   // "ai", and similar. Selectors that match every message get 0.
@@ -275,20 +288,24 @@
         // A selector that names the AI (role/author attributes) is much more
         // reliable than one that also matches the user's own messages.
         aiHints: aiHintScore(cand.sel),
+        // Second best signal: most matches start with "Assistant"/"AI"/...
+        aiLabel: Math.round(aiLabelRatio(matches) * 10),
         weight: weight,
         count: count,
         length: cand.sel.length
       };
-      const better = !best ||
-        score.tooBig < best.score.tooBig ||
-        (score.tooBig === best.score.tooBig && score.aiHints > best.score.aiHints) ||
-        (score.tooBig === best.score.tooBig && score.aiHints === best.score.aiHints &&
-          score.weight > best.score.weight) ||
-        (score.tooBig === best.score.tooBig && score.aiHints === best.score.aiHints &&
-          score.weight === best.score.weight && score.count < best.score.count) ||
-        (score.tooBig === best.score.tooBig && score.aiHints === best.score.aiHints &&
-          score.weight === best.score.weight && score.count === best.score.count &&
-          score.length < best.score.length);
+      // Compare in this order: not too big, names the AI, most matches look
+      // like AI messages, holds more text, fewer matches, shorter selector.
+      const keys = ['tooBig', 'aiHints', 'aiLabel', 'weight', 'count', 'length'];
+      const preferSmaller = { tooBig: true, aiHints: false, aiLabel: false,
+        weight: false, count: true, length: true };
+      const better = !best || (function compare() {
+        for (const key of keys) {
+          if (score[key] === best.score[key]) continue;
+          return preferSmaller[key] ? score[key] < best.score[key] : score[key] > best.score[key];
+        }
+        return false;
+      })();
       if (better) best = { sel: cand.sel, count: count, exact: false, score: score };
     }
 
@@ -300,10 +317,64 @@
       if (path) return { selector: path, count: 1, exact: false, fallback: true };
       return { error: 'I could not make a stable selector for that spot. Please click directly on it (try Arrow Up for a bigger area).' };
     }
+    // Nothing tidy was found. Try a structural selector on the parent chain
+    // that still matches more than one block (the replies are usually
+    // siblings with identical structure).
+    const structural = structuralReplySelector(el, doc);
+    if (structural) return structural;
     return {
       error: 'I could not find a selector that matches every reply. Please click on the reply text, ' +
         'or press Arrow Up once or twice to select a bigger area around it.'
     };
+  }
+
+  // A path from <body> down to a node, using plain tags. The node itself is
+  // written without a position, so all its siblings with the same tag match.
+  function repeatingPath(node, doc) {
+    const parts = [];
+    let current = node;
+    while (current && current.nodeType === 1 && current !== doc.body && current !== doc.documentElement) {
+      const parent = current.parentElement;
+      if (!parent) return '';
+      const tag = tagOf(current);
+      const sameTag = Array.from(parent.children).filter((child) => tagOf(child) === tag);
+      // The repeating node is matched without a position; the ancestors are
+      // matched with one so the path stays unique above it.
+      if (current !== node && sameTag.length > 1) {
+        parts.unshift(tag + ':nth-of-type(' + (sameTag.indexOf(current) + 1) + ')');
+      } else {
+        parts.unshift(tag);
+      }
+      current = parent;
+    }
+    return parts.length ? 'body > ' + parts.join(' > ') : '';
+  }
+
+  // A last-resort reply selector: the closest ancestor whose tag repeats under
+  // its own parent, for example "div > div > div". It ignores class names, so
+  // it keeps working when the site changes them, and it matches every block
+  // with the same shape, which includes future replies.
+  function structuralReplySelector(el, doc) {
+    let node = el;
+    for (let level = 0; node && level < 6; level++, node = node.parentElement) {
+      const parent = node.parentElement;
+      if (!parent || parent === doc.body) break;
+      const tag = tagOf(node);
+      const siblings = Array.from(parent.children).filter((child) => tagOf(child) === tag);
+      if (siblings.length < 2) continue;
+      // Build a path WITHOUT the position of this node, so every block of the
+      // same shape matches: "body > div > div > div".
+      const path = repeatingPath(node, doc);
+      if (!path) continue;
+      const matches = queryAll(doc, path);
+      if (matches.length < 2) continue;
+      // The clicked element must be inside the saved match.
+      if (!containsClick(matches, el)) continue;
+      const weight = replyWeight(matches, doc);
+      if (!weight) continue;
+      return { selector: path, count: matches.length, exact: false, fallback: true };
+    }
+    return null;
   }
 
   // Short description of an element, shown in the picker toast.
@@ -315,8 +386,15 @@
     return '<' + tag + id + cls + '>';
   }
 
+  // Share of matches that look like AI messages (used for a friendly warning).
+  function aiShareOf(selector, doc) {
+    const matches = queryAll(doc || document, selector, 50);
+    return aiLabelRatio(matches);
+  }
+
   return {
     MAX_REPLY_MATCHES,
+    aiShareOf,
     buildSelector,
     describeElement,
     escapeAttr,
