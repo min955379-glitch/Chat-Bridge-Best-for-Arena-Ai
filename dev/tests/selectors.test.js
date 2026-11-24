@@ -169,3 +169,15 @@ test('a page with only hash class names still gets a usable reply selector', () 
   const last = found[found.length - 1];
   assert.ok(last === clicked || last.contains(clicked));
 });
+
+test('an agent page with a single answer block still saves a reply picker', () => {
+  // Arena agent pages show only the current answer while the agent works.
+  const doc = makeDoc(
+    '<main><div class="agent">' +
+    '<div class="user-turn"><p>do the task</p></div>' +
+    '<div class="agent-turn" data-role="assistant"><div class="markdown"><p>Working on it...</p></div></div>' +
+    '</div></main>');
+  const built = Selectors.buildSelector(doc.querySelector('.agent-turn p'), 'reply', doc);
+  assert.ok(!built.error, built.error);
+  assert.equal(doc.querySelectorAll(built.selector).length, 1);
+});

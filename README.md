@@ -317,7 +317,7 @@ npm install     # installs jsdom, only for the tests
 npm test
 ```
 
-What is covered (112 tests):
+What is covered (113 tests):
 
 * `selectors.test.js` — hash classes are rejected, replies match every answer, ids with
   digits are ignored, the structural fallback works, and the builder is checked against

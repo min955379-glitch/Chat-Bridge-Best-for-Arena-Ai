@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Chat Bridge</title>
+  <style>
+/* popup.css — light, narrow, easy to read. No frameworks. */
+
+:root {
+  --blue: #2f6fed;
+  --blue-dark: #1f56c8;
+  --ink: #1b2233;
+  --muted: #667085;
+  --line: #e4e7ee;
+  --green: #148a4b;
+  --green-soft: #e6f6ec;
+  --red: #c0392b;
+  --red-soft: #fdecea;
+  --amber: #9a6700;
+  --amber-soft: #fff6dd;
+  --bg: #f4f6fa;
+  --card: #ffffff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 340px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+body { padding: 10px 10px 14px; }
+
+/* ---------- header ---------- */
+.top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 4px 10px;
+}
+.logo { width: 30px; height: 30px; }
+.top h1 {
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: .2px;
+}
+.badge {
+  margin: 1px 0 0;
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--blue-dark);
+  background: #e8f0ff;
+  border-radius: 20px;
+  padding: 1px 8px;
+}
+
+/* ---------- cards ---------- */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 12px 12px;
+  margin-bottom: 10px;
+}
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.num {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--blue);
+  color: #fff;
+  font-size: 11px;
+  letter-spacing: 0;
+}
+.site {
+  margin: 0 0 9px;
+  font-weight: 600;
+  font-size: 13px;
+  word-break: break-all;
+}
+.hint {
+  margin: 7px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* ---------- pick rows ---------- */
+.rows { display: grid; gap: 6px; margin-bottom: 9px; }
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tick {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  color: #b3b9c7;
+  font-size: 12px;
+  line-height: 1;
+}
+.tick.done {
+  background: var(--green-soft);
+  border-color: #b9e2c9;
+  color: var(--green);
+  font-weight: 700;
+}
+.row-text { flex: 1; }
+.row-text em { color: var(--muted); font-style: normal; font-size: 11px; }
+
+/* ---------- buttons ---------- */
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  padding: 6px 10px;
+  transition: background .12s, border-color .12s;
+}
+button:hover { background: #f7f9fc; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: .55; cursor: not-allowed; }
+
+button.small { padding: 5px 9px; font-size: 12px; }
+button.ghost { font-size: 12px; padding: 6px 4px; }
+button.ghost.danger { color: var(--red); }
+button.link {
+  border: none;
+  background: none;
+  color: var(--blue-dark);
+  padding: 0;
+  font-size: 12px;
+  text-decoration: underline;
+}
+button.link:hover { background: none; color: var(--blue); }
+
+.button-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.roles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+button.role {
+  font-weight: 600;
+  background: #f7f9ff;
+  border-color: #cdd9f6;
+}
+button.role.mine {
+  background: var(--green-soft);
+  border-color: #9fd7b4;
+  color: var(--green);
+}
+
+/* ---------- test output ---------- */
+.test-output {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 7px 9px;
+}
+.test-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+#test-text {
+  margin: 0;
+  max-height: 150px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 11.5px/1.45 Menlo, Consolas, monospace;
+}
+
+/* ---------- form fields ---------- */
+label {
+  display: block;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-weight: 600;
+}
+label.full { margin: 8px 0; }
+label.check {
+  display: flex;
+  gap: 7px;
+  align-items: flex-start;
+  margin: 9px 0;
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 12px;
+}
+label.check input { margin-top: 2px; }
+label.inline { display: flex; flex-direction: column; gap: 3px; }
+
+input[type="text"],
+input[type="number"],
+input[type="password"],
+select,
+textarea {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  font: 12.5px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid #cfd5e2;
+  border-radius: 6px;
+  padding: 5px 7px;
+}
+textarea { resize: vertical; }
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid #c9dafd;
+  border-color: var(--blue);
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+.api-box {
+  border: 1px dashed #c5d2ef;
+  background: #f8faff;
+  border-radius: 8px;
+  padding: 9px 10px;
+  margin-top: 8px;
+}
+hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 10px 0 2px;
+}
+
+/* ---------- run ---------- */
+.run-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+button.primary {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+  font-weight: 700;
+  padding: 9px 10px;
+  font-size: 14px;
+}
+button.primary:hover { background: var(--blue-dark); }
+button.danger {
+  color: var(--red);
+  border-color: #efc9c4;
+  background: var(--red-soft);
+  font-weight: 600;
+}
+button.danger:hover { background: #fbdcd8; }
+
+.status {
+  margin: 9px 0 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f2f5fb;
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  min-height: 34px;
+  white-space: pre-wrap;
+}
+.status.running { background: #eaf1ff; border-color: #c9dafd; }
+.status.done { background: var(--green-soft); border-color: #b9e2c9; color: var(--green); }
+.status.stopped { background: var(--amber-soft); border-color: #f0dca5; color: var(--amber); }
+.status.error { background: var(--red-soft); border-color: #efc9c4; color: var(--red); }
+
+.log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.log {
+  margin: 0;
+  padding: 0 0 0 0;
+  list-style: none;
+  max-height: 138px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+.log li {
+  font: 11px/1.4 Menlo, Consolas, monospace;
+  padding: 3px 8px;
+  border-bottom: 1px solid #eef1f6;
+  word-break: break-word;
+}
+.log li:last-child { border-bottom: none; }
+.log .time { color: #98a2b3; margin-right: 5px; }
+.log .empty { color: #98a2b3; font-family: inherit; }
+
+footer {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 0 4px;
+}
+
+</style>
+</head>
+<body>
+  <header class="top">
+    <img src="icons/icon48.png" alt="" class="logo">
+    <div>
+      <h1>Chat Bridge</h1>
+      <p id="mode-badge" class="badge">Tab to tab</p>
+    </div>
+  </header>
+
+  <!-- ================= 1. THIS TAB ================= -->
+  <section class="card">
+    <h2><span class="num">1</span> This tab</h2>
+    <p class="site" id="site-label">Reading this tab...</p>
+
+    <div class="rows">
+      <div class="row">
+        <span class="tick" id="tick-input" title="Not picked yet">○</span>
+        <span class="row-text">Chat box</span>
+        <button id="pick-input" class="small">Pick chat box</button>
+      </div>
+      <div class="row">
+        <span class="tick" id="tick-send" title="Not picked yet">○</span>
+        <span class="row-text">Send button <em>(optional)</em></span>
+        <button id="pick-send" class="small">Pick send button</button>
+      </div>
+      <div class="row">
+        <span class="tick" id="tick-reply" title="Not picked yet">○</span>
+        <span class="row-text">AI reply</span>
+        <button id="pick-reply" class="small">Pick AI reply</button>
+      </div>
+    </div>
+
+    <div class="button-grid">
+      <button id="test-copy" class="ghost">Test copy</button>
+      <button id="test-paste" class="ghost">Test paste</button>
+      <button id="clear-picks" class="ghost danger">Clear picks</button>
+    </div>
+
+    <div class="roles">
+      <button id="make-a" class="role">Make this Tab A</button>
+      <button id="make-b" class="role">Make this Tab B</button>
+    </div>
+    <p class="hint" id="roles-line">No tabs chosen yet.</p>
+
+    <div id="test-output" class="test-output" hidden>
+      <div class="test-head">
+        <strong id="test-title">Test copy</strong>
+        <button id="test-close" class="link">close</button>
+      </div>
+      <pre id="test-text"></pre>
+    </div>
+  </section>
+
+  <!-- ================= 2. SETTINGS ================= -->
+  <section class="card">
+    <h2><span class="num">2</span> Settings</h2>
+
+    <div class="grid2">
+      <label>Rounds
+        <input id="rounds" type="number" min="1" max="100" step="1">
+      </label>
+      <label>Seconds of silence
+        <input id="silence" type="number" min="2" max="120" step="1">
+      </label>
+      <label>Copy mode A
+        <select id="copy-mode-a">
+          <option value="full">Full reply</option>
+          <option value="code">Last code block</option>
+          <option value="markers">Between markers</option>
+        </select>
+      </label>
+      <label>Copy mode B
+        <select id="copy-mode-b">
+          <option value="full">Full reply</option>
+          <option value="code">Last code block</option>
+          <option value="markers">Between markers</option>
+        </select>
+      </label>
+      <label>START marker
+        <input id="marker-start" type="text">
+      </label>
+      <label>END marker
+        <input id="marker-end" type="text">
+      </label>
+      <label>Timeout (seconds)
+        <input id="timeout" type="number" min="30" max="3600" step="10">
+      </label>
+      <label>Max rounds safety limit
+        <input id="max-rounds" type="number" min="1" max="100" step="1">
+      </label>
+    </div>
+
+    <label class="full">Prefix text (added before every forwarded message)
+      <textarea id="prefix" rows="2" placeholder="For example: Here is the other AI's answer. Improve it."></textarea>
+    </label>
+    <label class="full">Suffix text (added after every forwarded message)
+      <textarea id="suffix" rows="2" placeholder="For example: Put your next message between START and END."></textarea>
+    </label>
+
+    <label class="check">
+      <input id="stop-if-same" type="checkbox">
+      Stop if the new reply is identical to the previous one
+    </label>
+    <label class="full inline">Stop when the reply contains
+      <input id="stop-word" type="text" placeholder="DONE">
+    </label>
+
+    <hr>
+
+    <label class="full">Mode
+      <select id="mode">
+        <option value="tab">Tab to Tab (two chat tabs talk)</option>
+        <option value="api">Tab and API (chat tab talks to an AI API)</option>
+      </select>
+    </label>
+
+    <div id="api-settings" class="api-box" hidden>
+      <label class="full">Main provider
+        <select id="provider">
+          <option value="gemini">Google Gemini (backup: Grok)</option>
+          <option value="grok">xAI Grok (backup: Gemini)</option>
+        </select>
+      </label>
+      <div class="grid2">
+        <label>Gemini API key
+          <input id="gemini-key" type="password" autocomplete="off" spellcheck="false" placeholder="AIza...">
+        </label>
+        <label>Gemini model
+          <input id="gemini-model" type="text" spellcheck="false">
+        </label>
+        <label>Grok API key
+          <input id="grok-key" type="password" autocomplete="off" spellcheck="false" placeholder="xai-...">
+        </label>
+        <label>Grok model
+          <input id="grok-model" type="text" spellcheck="false">
+        </label>
+      </div>
+      <div class="grid2">
+        <label>Messages kept as memory
+          <input id="memory" type="number" min="0" max="30" step="2">
+        </label>
+      </div>
+      <label class="full">System prompt for the API (optional)
+        <textarea id="system-prompt" rows="2"
+          placeholder="You are a careful engineer. Answer clearly."></textarea>
+      </label>
+      <p class="hint">Keys stay on this computer in chrome.storage.local. They are never shown in the log.</p>
+    </div>
+  </section>
+
+  <!-- ================= 3. RUN ================= -->
+  <section class="card">
+    <h2><span class="num">3</span> Run</h2>
+    <div class="run-buttons">
+      <button id="start" class="primary">Start</button>
+      <button id="stop" class="danger">Stop</button>
+    </div>
+    <p id="status" class="status">Ready.</p>
+
+    <div class="log-head">
+      <strong>Last events</strong>
+      <button id="copy-log" class="link">Copy log</button>
+    </div>
+    <ol id="log" class="log"></ol>
+  </section>
+
+  <footer>
+    <button id="show-readme" class="link">How to use</button>
+    <span>·</span>
+    <span>Everything stays in this browser.</span>
+  </footer>
+
+  <script src="common.js"></script>
+  <script src="extract.js"></script>
+  <script src="common.js"></script>
+<script>
+// ---- a fake chrome API, so popup.js can run outside the extension ----
+const store = {
+  settings: { rounds: 3, silence: 20, copyModeA: 'markers', copyModeB: 'markers',
+    markerStart: 'START', markerEnd: 'END', prefix: "Here is the other AI's answer. Improve it.",
+    suffix: 'Put your next message between START and END.', timeout: 600, maxRounds: 100,
+    mode: 'tab', provider: 'gemini', geminiModel: 'gemini-2.5-flash', grokModel: 'grok-4', memory: 6 },
+  roles: { A: 42, B: 43 },
+  roleTitles: { 42: 'Arena chat', 43: 'Arena agent' },
+  'site_https://arena.ai/agent': {
+    input: { selector: '#box' }, send: { selector: '#send' }, reply: { selector: '.answer' }
+  },
+  status: { text: 'Round 2/3: waiting for B to finish (12s of 20s silence)', tone: 'running', running: true },
+  log: [
+    { t: Date.now() - 96000, text: 'Run started in tab to tab mode.' },
+    { t: Date.now() - 96000, text: 'Tab mode started: 3 rounds.' },
+    { t: Date.now() - 95000, text: 'Sending 412 characters from A to B.' },
+    { t: Date.now() - 93000, text: 'B (Arena agent) started answering.' },
+    { t: Date.now() - 67000, text: 'B answered with 388 characters.' },
+    { t: Date.now() - 65000, text: 'Sending 388 characters from B to A.' },
+    { t: Date.now() - 62000, text: 'A (Arena chat) started answering.' },
+    { t: Date.now() - 36000, text: 'A answered with 301 characters.' },
+    { t: Date.now() - 36000, text: 'Round 1 of 3 finished.' },
+    { t: Date.now() - 34000, text: 'Sending 301 characters from A to B.' }
+  ]
+};
+const listeners = [];
+const clone = (v) => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+window.chrome = {
+  storage: {
+    local: {
+      get: async (keys) => {
+        const out = {};
+        for (const k of (Array.isArray(keys) ? keys : [keys])) if (k in store) out[k] = clone(store[k]);
+        return out;
+      },
+      set: async (values) => { Object.assign(store, clone(values)); listeners.forEach(f => f({}, 'local')); },
+      remove: async (keys) => { for (const k of (Array.isArray(keys) ? keys : [keys])) delete store[k]; }
+    },
+    onChanged: { addListener: (fn) => listeners.push(fn) }
+  },
+  tabs: {
+    query: async () => [{ id: 43, url: 'https://arena.ai/agent/xyz', title: 'Arena agent' }],
+    sendMessage: (id, message, cb) => setTimeout(() => cb({ ok: true, count: 3, text: 'x'.repeat(400), length: 400,
+      note: 'Done: "test" is in the chat box. It was NOT sent.' }), 10),
+    create: () => {}
+  },
+  runtime: {
+    sendMessage: (message, cb) => setTimeout(() => cb(message.type === 'state' ? { roles: store.roles } : { ok: true }), 5),
+    lastError: null,
+    getURL: (p) => p
+  },
+  scripting: { executeScript: async () => [] }
+};
+window.close = () => {};
+</script>
+<script src="popup.js"></script>
+</body>
+</html>
