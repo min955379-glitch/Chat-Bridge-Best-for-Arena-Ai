@@ -155,9 +155,63 @@
     </div>
   </section>
 
-  <!-- ================= 3. RUN ================= -->
+  <!-- ================= 3. SMART HELPER ================= -->
   <section class="card">
-    <h2><span class="num">3</span> Run</h2>
+    <h2><span class="num">3</span> Smart Helper <em class="tag">optional</em></h2>
+    <p class="hint helper-intro">
+      Three optional helpers that use your Gemini or Grok key. They send chat text to
+      Google or xAI. With the switch off (the default) nothing leaves this computer.
+    </p>
+
+    <label class="check master">
+      <input id="helper-on" type="checkbox">
+      <span><strong>Turn on the Smart Helper</strong> — off by default</span>
+    </label>
+
+    <div id="helper-body" class="helper-body" hidden>
+      <label class="check">
+        <input id="helper-roles" type="checkbox">
+        <span>Auto detect brain and worker</span>
+      </label>
+      <div class="helper-row">
+        <button id="helper-detect" class="ghost small">Auto detect brain and worker</button>
+      </div>
+      <p class="hint" id="helper-detect-result">Not checked yet.</p>
+
+      <label class="check">
+        <input id="helper-best" type="checkbox">
+        <span>Pick the best answer when a chat shows several</span>
+      </label>
+
+      <label class="check">
+        <input id="helper-stop" type="checkbox">
+        <span>Auto stop when the project is done</span>
+      </label>
+
+      <label class="full">Project goal (what the two AIs must finish)
+        <textarea id="goal" rows="2"
+          placeholder="For example: a working to-do app in one HTML file, with add and delete."></textarea>
+      </label>
+
+      <div class="grid2">
+        <label>Check every N rounds
+          <input id="helper-stop-every" type="number" min="1" max="20" step="1">
+        </label>
+        <label>Max helper calls per run
+          <input id="helper-max-calls" type="number" min="0" max="500" step="5">
+        </label>
+      </div>
+
+      <p class="hint">
+        Only the last few messages are sent, never the whole chat. Keys never leave this
+        browser except to the provider you chose.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= 4. RUN ================= -->
+  <section class="card">
+    <h2><span class="num">4</span> Run</h2>
     <div class="run-buttons">
       <button id="start" class="primary">Start</button>
       <button id="stop" class="danger">Stop</button>

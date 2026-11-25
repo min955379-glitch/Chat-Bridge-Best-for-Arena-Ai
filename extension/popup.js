@@ -47,6 +47,16 @@ const el = {
   grokModel: $('grok-model'),
   memory: $('memory'),
   systemPrompt: $('system-prompt'),
+  helperOn: $('helper-on'),
+  helperBody: $('helper-body'),
+  helperRoles: $('helper-roles'),
+  helperDetect: $('helper-detect'),
+  helperDetectResult: $('helper-detect-result'),
+  helperBest: $('helper-best'),
+  helperStop: $('helper-stop'),
+  goal: $('goal'),
+  helperStopEvery: $('helper-stop-every'),
+  helperMaxCalls: $('helper-max-calls'),
   start: $('start'),
   stop: $('stop'),
   status: $('status'),
@@ -231,7 +241,14 @@ function readForm() {
     grokKey: el.grokKey.value,
     grokModel: el.grokModel.value,
     memory: el.memory.value,
-    systemPrompt: el.systemPrompt.value
+    systemPrompt: el.systemPrompt.value,
+    helperOn: el.helperOn.checked,
+    helperRoles: el.helperRoles.checked,
+    helperBest: el.helperBest.checked,
+    helperStop: el.helperStop.checked,
+    goal: el.goal.value,
+    helperStopEvery: el.helperStopEvery.value,
+    helperMaxCalls: el.helperMaxCalls.value
   });
 }
 
@@ -256,7 +273,25 @@ function fillForm(value) {
   el.grokModel.value = value.grokModel;
   el.memory.value = value.memory;
   el.systemPrompt.value = value.systemPrompt;
+  el.helperOn.checked = value.helperOn;
+  el.helperRoles.checked = value.helperRoles;
+  el.helperBest.checked = value.helperBest;
+  el.helperStop.checked = value.helperStop;
+  el.goal.value = value.goal;
+  el.helperStopEvery.value = value.helperStopEvery;
+  el.helperMaxCalls.value = value.helperMaxCalls;
+  renderHelper();
   renderModeBadge();
+}
+
+// The helper options only appear when the master switch is on: a beginner
+// should not have to wonder which of these boxes do anything.
+function renderHelper() {
+  const on = el.helperOn.checked;
+  el.helperBody.hidden = !on;
+  el.helperDetect.disabled = !on || !el.helperRoles.checked;
+  el.goal.disabled = !on || !el.helperStop.checked;
+  el.helperStopEvery.disabled = !on || !el.helperStop.checked;
 }
 
 // Save a moment after the user stops typing, so every keystroke is kept but
@@ -264,6 +299,7 @@ function fillForm(value) {
 function scheduleSave() {
   settings = readForm();
   renderModeBadge();
+  renderHelper();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     await chrome.storage.local.set({ settings: settings });
@@ -334,6 +370,31 @@ async function testPaste() {
     return;
   }
   setTestOutput('Test paste', reply.note || 'The word "test" is in the chat box. It was not sent.', false);
+}
+
+// Smart Helper part 1: ask the background worker which window is the brain.
+// The worker changes the roles; this only shows the result in plain words.
+async function detectRoles() {
+  el.helperDetect.disabled = true;
+  el.helperDetectResult.textContent = 'Thinking about both chats...';
+  await flushSave();
+  const reply = await bgMessage({ type: 'detectRoles' });
+  el.helperDetect.disabled = false;
+  renderHelper();
+  if (reply && reply.error) {
+    el.helperDetectResult.textContent = reply.error;
+    el.helperDetectResult.className = 'hint detect-bad';
+    return;
+  }
+  const message = (reply && reply.message) || 'The roles were set.';
+  el.helperDetectResult.textContent = message;
+  el.helperDetectResult.className = 'hint detect-good';
+  // The worker saved the new roles; show them here too.
+  const stored = await chrome.storage.local.get('roles');
+  if (stored.roles) {
+    state.roles = stored.roles;
+    renderRoles();
+  }
 }
 
 async function clearPicks() {
@@ -418,6 +479,9 @@ el.testClose.addEventListener('click', () => { el.testOutput.hidden = true; });
 el.start.addEventListener('click', start);
 el.stop.addEventListener('click', stop);
 el.copyLog.addEventListener('click', copyLog);
+el.helperDetect.addEventListener('click', detectRoles);
+el.helperRoles.addEventListener('change', renderHelper);
+el.helperStop.addEventListener('change', renderHelper);
 el.showReadme.addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('README.html') });
 });
@@ -426,7 +490,8 @@ const settingFields = [
   el.rounds, el.silence, el.copyModeA, el.copyModeB, el.markerStart, el.markerEnd,
   el.timeout, el.maxRounds, el.prefix, el.suffix, el.stopIfSame, el.stopWord,
   el.mode, el.provider, el.geminiKey, el.geminiModel, el.grokKey, el.grokModel,
-  el.memory, el.systemPrompt
+  el.memory, el.systemPrompt, el.helperOn, el.helperRoles, el.helperBest,
+  el.helperStop, el.goal, el.helperStopEvery, el.helperMaxCalls
 ];
 for (const field of settingFields) {
   field.addEventListener('input', scheduleSave);
@@ -467,7 +532,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 // ---------- start up ----------
 (async function init() {
-  const stored = await chrome.storage.local.get(['settings', 'status', 'log', 'roles', 'run']);
+  const stored = await chrome.storage.local.get(['settings', 'status', 'log', 'roles', 'run', 'helperDetect']);
   settings = Common.normalizeSettings(stored.settings);
   fillForm(settings);
   state.status = stored.status || null;
@@ -479,6 +544,12 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
   showStatus(state.status);
   renderLog(state.log);
+  // The last role detection stays visible, so a result is not lost when the
+  // popup closes.
+  if (stored.helperDetect && stored.helperDetect.message) {
+    el.helperDetectResult.textContent = stored.helperDetect.message;
+    el.helperDetectResult.className = 'hint detect-good';
+  }
   await loadCurrentTab();
   renderRoles();
 })();

@@ -161,7 +161,34 @@
     provider. A provider that hit 429 rests for 60 seconds. The log says which provider
     answered.</p>
 
-  <h2>7. Common problems</h2>
+  <h2>7. Smart Helper (optional)</h2>
+  <p>Three optional helpers that use your Gemini or Grok key with the same automatic
+    fallback. They are <strong>off by default</strong>, and Tab to Tab mode works with no
+    keys at all.</p>
+  <ul>
+    <li><strong>Auto detect brain and worker</strong> — reads the last reply and the last
+      user message of both tabs, asks the API which window plans (the brain) and which one
+      does the work (the worker), then sets the brain as Tab A and the worker as Tab B.
+      The result is shown in plain words. You can always change it by hand with the
+      Make this Tab A / B buttons. If the answer is unclear, nothing is changed.</li>
+    <li><strong>Pick the best answer</strong> — when a chat shows several answer cards for
+      the newest turn, all of them are read and the API picks the best one for your project
+      goal. Only that card is forwarded. With one answer no API call is made.</li>
+    <li><strong>Auto stop when done</strong> — type the project goal. After every round
+      (or every N rounds) the API is asked whether the project is finished. On DONE the loop
+      stops and the reason appears in the status line.</li>
+  </ul>
+  <p><strong>Safety:</strong> a hard limit of helper calls per run (30 by default), only the
+    last few messages are sent, keys never appear in a message or in the log, and a failed
+    helper call is logged while the normal loop carries on. The log names the provider that
+    answered every call.</p>
+  <p style="background:#fff6dd;border:1px solid #f0dca5;border-radius:8px;padding:10px 12px">
+    <strong>Note:</strong> the Smart Helper is the only part of Chat Bridge that sends your
+    chat text to Google or xAI. With the switch off, nothing leaves this computer beyond the
+    API mode requests you already chose to make.
+  </p>
+
+  <h2>8. Common problems</h2>
   <table>
     <tr><th>Message</th><th>What to do</th></tr>
     <tr><td>Chat box not found</td><td>Clear the picks and pick the three spots again.</td></tr>
@@ -172,11 +199,13 @@
     <tr><td>I could not find the START marker</td><td>Tell the AI to wrap its message between your marker words.</td></tr>
     <tr><td>Run was interrupted</td><td>Chrome restarted the extension in the background. Press Start again.</td></tr>
     <tr><td>API key was rejected</td><td>Copy the key again; make sure it belongs to that provider.</td></tr>
+    <tr><td>Smart Helper: no API key is saved</td><td>Add a Gemini or Grok key in Settings, or switch the helper off.</td></tr>
+    <tr><td>Smart Helper: used all its calls</td><td>Raise Max helper calls per run. The normal loop still works.</td></tr>
   </table>
 
   <p style="margin-top:28px;color:#667085;font-size:13px">
-    Nothing is sent anywhere except the API requests you turn on in API mode.
-    All picks and settings live in this browser.
+    Nothing is sent anywhere except the API requests you turn on: API mode, and the
+    Smart Helper when you switch it on. All picks and settings live in this browser.
   </p>
 </main>
 </body>

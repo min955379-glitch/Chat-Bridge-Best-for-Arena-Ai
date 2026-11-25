@@ -100,3 +100,34 @@ test('provider helpers', () => {
 test('picks are stored under a site prefix', () => {
   assert.equal(Common.pickStorageKey('https://arena.ai/c'), 'site_https://arena.ai/c');
 });
+
+// ---------- Smart Helper settings ----------
+test('the Smart Helper is off by default and a part needs the master switch', () => {
+  const C = require('../../extension/common.js');
+  const fresh = C.normalizeSettings({});
+  assert.equal(fresh.helperOn, false, 'off by default');
+  assert.equal(fresh.helperRoles, false);
+  assert.equal(fresh.helperBest, false);
+  assert.equal(fresh.helperStop, false);
+  assert.equal(fresh.helperStopEvery, 1, 'check every round by default');
+  assert.equal(fresh.helperMaxCalls, 30, '30 calls per run by default');
+  assert.equal(fresh.goal, '');
+
+  // A part saved as on while the master switch is off loads as off.
+  const sneaky = C.normalizeSettings({ helperOn: false, helperStop: true, helperBest: true });
+  assert.equal(sneaky.helperStop, false);
+  assert.equal(sneaky.helperBest, false);
+
+  const on = C.normalizeSettings({ helperOn: true, helperStop: true });
+  assert.equal(on.helperStop, true);
+});
+
+test('the helper numbers are kept inside safe ranges', () => {
+  const C = require('../../extension/common.js');
+  assert.equal(C.normalizeSettings({ helperStopEvery: 0 }).helperStopEvery, 1);
+  assert.equal(C.normalizeSettings({ helperStopEvery: 99 }).helperStopEvery, 20);
+  assert.equal(C.normalizeSettings({ helperMaxCalls: -5 }).helperMaxCalls, 0);
+  assert.equal(C.normalizeSettings({ helperMaxCalls: 9999 }).helperMaxCalls, 500);
+  assert.equal(C.normalizeSettings({ helperMaxCalls: 'abc' }).helperMaxCalls, 30);
+  assert.equal(C.normalizeSettings({ goal: 42 }).goal, '42');
+});

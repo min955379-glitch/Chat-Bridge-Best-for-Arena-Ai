@@ -182,6 +182,67 @@
     return { ok: true, count: list.length, text: text, code: code };
   }
 
+  // ---------- answer cards of the newest turn ----------
+  // Some chats (Arena battle mode) show several answers for the same turn.
+  // The cards are siblings: they share the same parent as the last match.
+  // Returns the text of every card, oldest first, each with its own code block.
+  function readNewestGroup(selector) {
+    const list = replyMatches(selector);
+    if (!list.length) return { ok: true, count: 0, cards: [] };
+    selectorsThatMatched.add(selector);
+    const last = list[list.length - 1];
+    const parent = last.parentElement;
+    // Cards from the same parent, in page order. When the pick points at
+    // something without a useful parent, the last reply is the only card.
+    let group = [last];
+    if (parent && parent.querySelectorAll) {
+      const sameParent = list.filter(function (element) {
+        return element.parentElement === parent;
+      });
+      if (sameParent.length > 1) group = sameParent;
+    }
+    // Only a group that ends with the last match is "the newest turn": an
+    // older group is never used.
+    const cards = group.map(function (element) {
+      const body = textBodyOf(element);
+      const text = Extract.cleanText(Extract.visibleText(body));
+      let code = '';
+      const blocks = (body || element).querySelectorAll('pre code, pre');
+      if (blocks.length) {
+        const block = blocks[blocks.length - 1];
+        const holder = block.tagName === 'PRE' && block.querySelector('code')
+          ? block.querySelector('code') : block;
+        code = Extract.cleanText(Extract.visibleText(holder));
+      }
+      return { text: text, code: code };
+    }).filter(function (card) { return card.text; });
+    return { ok: true, count: cards.length, cards: cards };
+  }
+
+  // The newest message the USER typed, for the Smart Helper's role question.
+  // Sites mark user turns in different ways, so try the usual attributes and
+  // fall back to a bubble that holds the chat box's own text. Never fails.
+  const USER_TURN_SELECTOR = [
+    '[data-message-author-role="user"]',
+    '[data-role="user"]',
+    '.user-message', '.user-turn',
+    '[class*="user-message"]', '[class*="human"]'
+  ].join(', ');
+
+  function readLastUserMessage() {
+    let candidates = [];
+    try {
+      candidates = Selectors.queryAll(document, USER_TURN_SELECTOR).filter(isVisible);
+    } catch (err) {
+      candidates = [];
+    }
+    if (!candidates.length) return { ok: true, text: '' };
+    const element = candidates[candidates.length - 1];
+    const body = textBodyOf(element) || element;
+    const text = Extract.cleanText(Extract.visibleText(body));
+    return { ok: true, text: text };
+  }
+
   // ---------- pasting and sending ----------
   // React and Vue only notice a value change made through the native setter.
   function setNativeValue(box, text) {
@@ -656,6 +717,20 @@
         return { error: 'Chat box not found: please pick the chat box on this site first.' };
       }
       return deliverMessage(picks, message.text);
+    },
+
+    // Smart Helper (part 2): every answer card of the newest turn.
+    async readReplyGroup(message) {
+      const picks = message.picks || await readPicks(siteKey());
+      if (!picks || !picks.reply) {
+        return { ok: false, count: 0, cards: [], error: 'The AI reply is not picked for this site yet. Please pick the AI reply.' };
+      }
+      return readNewestGroup(picks.reply.selector);
+    },
+
+    // Smart Helper (part 1): the newest user message of this page.
+    async readLastUser() {
+      return readLastUserMessage();
     },
 
     // Background worker (once per second): the newest reply and match count.

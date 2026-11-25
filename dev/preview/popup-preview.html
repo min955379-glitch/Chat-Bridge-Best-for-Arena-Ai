@@ -337,6 +337,38 @@ footer {
   padding: 0 4px;
 }
 
+/* ---------- smart helper ---------- */
+.card h2 .tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  background: #eef1f7;
+  border-radius: 20px;
+  padding: 1px 7px;
+  margin-left: 6px;
+  font-style: normal;
+  vertical-align: middle;
+}
+.helper-intro { margin-bottom: 4px; }
+label.check.master {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: #fafbfe;
+  margin: 8px 0;
+}
+.helper-body {
+  border-top: 1px dashed var(--line);
+  margin-top: 6px;
+  padding-top: 4px;
+}
+.helper-body label.check { margin: 7px 0; }
+.helper-row { margin: 2px 0 6px 24px; }
+.helper-row button { width: 100%; }
+
+/* A good or bad result under the detect button. */
+.hint.detect-good { color: var(--green); font-weight: 600; }
+.hint.detect-bad { color: var(--red); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -489,9 +521,63 @@ footer {
     </div>
   </section>
 
-  <!-- ================= 3. RUN ================= -->
+  <!-- ================= 3. SMART HELPER ================= -->
   <section class="card">
-    <h2><span class="num">3</span> Run</h2>
+    <h2><span class="num">3</span> Smart Helper <em class="tag">optional</em></h2>
+    <p class="hint helper-intro">
+      Three optional helpers that use your Gemini or Grok key. They send chat text to
+      Google or xAI. With the switch off (the default) nothing leaves this computer.
+    </p>
+
+    <label class="check master">
+      <input id="helper-on" type="checkbox">
+      <span><strong>Turn on the Smart Helper</strong> — off by default</span>
+    </label>
+
+    <div id="helper-body" class="helper-body" hidden>
+      <label class="check">
+        <input id="helper-roles" type="checkbox">
+        <span>Auto detect brain and worker</span>
+      </label>
+      <div class="helper-row">
+        <button id="helper-detect" class="ghost small">Auto detect brain and worker</button>
+      </div>
+      <p class="hint" id="helper-detect-result">Not checked yet.</p>
+
+      <label class="check">
+        <input id="helper-best" type="checkbox">
+        <span>Pick the best answer when a chat shows several</span>
+      </label>
+
+      <label class="check">
+        <input id="helper-stop" type="checkbox">
+        <span>Auto stop when the project is done</span>
+      </label>
+
+      <label class="full">Project goal (what the two AIs must finish)
+        <textarea id="goal" rows="2"
+          placeholder="For example: a working to-do app in one HTML file, with add and delete."></textarea>
+      </label>
+
+      <div class="grid2">
+        <label>Check every N rounds
+          <input id="helper-stop-every" type="number" min="1" max="20" step="1">
+        </label>
+        <label>Max helper calls per run
+          <input id="helper-max-calls" type="number" min="0" max="500" step="5">
+        </label>
+      </div>
+
+      <p class="hint">
+        Only the last few messages are sent, never the whole chat. Keys never leave this
+        browser except to the provider you chose.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= 4. RUN ================= -->
+  <section class="card">
+    <h2><span class="num">4</span> Run</h2>
     <div class="run-buttons">
       <button id="start" class="primary">Start</button>
       <button id="stop" class="danger">Stop</button>
@@ -511,16 +597,19 @@ footer {
     <span>Everything stays in this browser.</span>
   </footer>
 
-  <script src="common.js"></script>
-  <script src="extract.js"></script>
-  <script src="common.js"></script>
+
 <script>
 // ---- a fake chrome API, so popup.js can run outside the extension ----
 const store = {
   settings: { rounds: 3, silence: 20, copyModeA: 'markers', copyModeB: 'markers',
     markerStart: 'START', markerEnd: 'END', prefix: "Here is the other AI's answer. Improve it.",
     suffix: 'Put your next message between START and END.', timeout: 600, maxRounds: 100,
-    mode: 'tab', provider: 'gemini', geminiModel: 'gemini-2.5-flash', grokModel: 'grok-4', memory: 6 },
+    mode: 'tab', provider: 'gemini', geminiModel: 'gemini-2.5-flash', grokModel: 'grok-4', memory: 6,
+    geminiKey: '', grokKey: '', systemPrompt: '',
+    // The Smart Helper, switched on with the goal typed, for the preview.
+    helperOn: true, helperRoles: true, helperBest: true, helperStop: true,
+    helperStopEvery: 1, helperMaxCalls: 30,
+    goal: 'A working to-do app in one HTML file, with add and delete.' },
   roles: { A: 42, B: 43 },
   roleTitles: { 42: 'Arena chat', 43: 'Arena agent' },
   'site_https://arena.ai/agent': {
@@ -570,6 +659,8 @@ window.chrome = {
 };
 window.close = () => {};
 </script>
+<script src="common.js"></script>
+<script src="extract.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>
