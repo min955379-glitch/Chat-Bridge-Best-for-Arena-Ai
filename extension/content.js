@@ -145,16 +145,28 @@
   }
 
   // ---------- reading a reply ----------
+  // Selectors that have matched at least one element since this page loaded.
+  // It lets the popup tell "this chat has no answer yet" apart from "my pick
+  // stopped working", without ever failing a running loop.
+  const selectorsThatMatched = new Set();
+
   // Full text of the newest reply + how many replies match + last code block.
+  // A page with no AI reply yet is NORMAL (a brand-new chat), so it returns
+  // count 0 and no error. The caller decides what that means.
   function readLastReply(selector) {
     const list = replyMatches(selector);
     if (!list.length) {
       return {
-        ok: false,
+        ok: true,
         count: 0,
-        error: 'The AI reply was not found on the page. The page may have changed, so please pick the AI reply again.'
+        text: '',
+        code: '',
+        // true when this selector worked before and now matches nothing,
+        // which usually means the page was rebuilt or the chat was cleared.
+        wasWorking: selectorsThatMatched.has(selector)
       };
     }
+    selectorsThatMatched.add(selector);
     const element = list[list.length - 1];
     // Use the same element for the text and the code block, so "last code
     // block" really means the last one in the answer that is being read.
@@ -603,6 +615,19 @@
       }
       const reply = readLastReply(pick.reply.selector);
       if (!reply.ok) return { error: reply.error };
+      if (reply.count === 0) {
+        // Test copy is an explicit question about the picker, so say what is
+        // going on. The background loop stays patient instead (see readReply).
+        return {
+          ok: true,
+          count: 0,
+          full: '',
+          error: reply.wasWorking
+            ? 'The AI reply is not on the page right now. The page may be rebuilding; press Test copy again in a moment.'
+            : 'No AI reply was found on this page. This chat has no answer yet, or the pick no longer fits: ' +
+              'wait for the AI to answer once, then press "Pick AI reply" again.'
+        };
+      }
       const settings = message.settings || { mode: 'full' };
       const chosen = Extract.applyModeToText(reply.text, settings.mode, {
         start: settings.start,
@@ -634,9 +659,12 @@
     },
 
     // Background worker (once per second): the newest reply and match count.
+    // This never fails because the chat is empty: a brand-new chat returns
+    // count 0, and the worker keeps waiting for the first answer.
     async readReply(message) {
       const picks = message.picks || await readPicks(siteKey());
       if (!picks || !picks.reply) {
+        // A missing pick is a real setup problem, so it is still an error.
         return { ok: false, error: 'The AI reply is not picked for this site yet. Please pick the AI reply.' };
       }
       return readLastReply(picks.reply.selector);

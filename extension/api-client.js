@@ -27,6 +27,21 @@
   const COOLDOWN_MS = 60000;         // a rate limited provider rests 60 seconds
   const RETRY_WAIT_MS = 2000;        // wait before the single retry
 
+  // When each provider may be used again (a timestamp per provider).
+  // It lives at module level so a 429 in one round is remembered in the next.
+  // A run can pass its own object in deps.cooldowns to keep it per run.
+  const sharedCooldowns = { gemini: 0, grok: 0 };
+
+  // Read the cooldown table: the one from the caller when given, else the
+  // shared one. Missing entries are created, so callers can pass {}.
+  function cooldownsFrom(deps) {
+    const table = deps && deps.cooldowns;
+    if (!table || typeof table !== 'object') return sharedCooldowns;
+    if (typeof table.gemini !== 'number') table.gemini = 0;
+    if (typeof table.grok !== 'number') table.grok = 0;
+    return table;
+  }
+
   function providerLabel(provider) {
     return provider === 'grok' ? 'Grok' : 'Gemini';
   }
@@ -159,7 +174,9 @@
     const models = { gemini: settings.geminiModel, grok: settings.grokModel };
 
     // Providers that hit a 429 rest for 60 seconds before being used again.
-    const cooldownUntil = { gemini: 0, grok: 0 };
+    // This table is NOT created here: it outlives a single request, so the
+    // second round already knows that Gemini is resting.
+    const cooldownUntil = cooldownsFrom(d);
 
     // One HTTP attempt with one provider. Throws a plain Error on any problem.
     async function attempt(provider) {
@@ -243,6 +260,7 @@
   return {
     COOLDOWN_MS,
     GEMINI_BASE,
+    sharedCooldowns,
     GROK_URL,
     REQUEST_TIMEOUT_MS,
     RETRY_WAIT_MS,
