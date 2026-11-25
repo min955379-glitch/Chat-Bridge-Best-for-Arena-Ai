@@ -127,6 +127,186 @@ test('using the same tab for A and B is refused', async () => {
   assert.match(reply.error, /same tab/);
 });
 
+// Bug 4: a closed Tab B used to be skipped by the pick check, so the run
+// started and then failed in the middle with a page error. It must be caught
+// before anything is sent, with the same plain words as Tab A.
+test('a closed Tab B is reported before the run starts', async () => {
+  const pageA = makePage({ replies: ['hello'], answerFor: () => 'a' });
+  const pageB = makePage({ replies: ['ready'], answerFor: () => 'b' });
+  const { worker, ids } = setup({ A: pageA, B: pageB }, baseSettings);
+  // Close Tab B by taking it out of the browser's tab list.
+  worker.chrome.__tabs.delete(ids.B);
+
+  const reply = await worker.send({ type: 'start' });
+  assert.ok(reply.error, 'the run must not start');
+  assert.match(reply.error, /Tab B is closed/);
+  assert.match(reply.error, /Make this Tab B/);
+  assert.equal(pageA.sends, 0, 'nothing is sent when a tab is closed');
+  assert.equal(pageB.sends, 0);
+});
+
+// A closed Tab A keeps its old plain message.
+test('a closed Tab A is reported before the run starts', async () => {
+  const pageA = makePage({ replies: ['hello'], answerFor: () => 'a' });
+  const pageB = makePage({ replies: ['ready'], answerFor: () => 'b' });
+  const { worker, ids } = setup({ A: pageA, B: pageB }, baseSettings);
+  worker.chrome.__tabs.delete(ids.A);
+
+  const reply = await worker.send({ type: 'start' });
+  assert.ok(reply.error, 'the run must not start');
+  assert.match(reply.error, /Tab A is closed/);
+  assert.match(reply.error, /Make this Tab A/);
+  assert.equal(pageA.sends, 0);
+  assert.equal(pageB.sends, 0);
+});
+
+// Bug 1: Tab B is a brand-new chat, so it has no AI reply at all yet. The
+// loop must wait for it instead of failing with "the AI reply was not found".
+test('a brand-new Tab B with no AI reply yet still works', { timeout: 60000 }, async () => {
+  const pageA = makePage({ replies: ['What is 2 + 2?'], answerFor: () => 'a' });
+  const pageB = makePage({ replies: [], answerFor: () => 'The answer is 4.' });
+  // 2 seconds is the shortest silence the settings allow, and 1 read per
+  // second in production; the test worker reads every 100 ms, so a reply
+  // settles quickly. The run is over as soon as B's answer is read.
+  const { worker } = setup({ A: pageA, B: pageB }, baseSettings);
+
+  // start resolves when the run is over, so do not await it here.
+  worker.send({ type: 'start' });
+  const status = await worker.waitForIdle(30000);
+
+  assert.equal(status.tone, 'done', 'status was: ' + JSON.stringify(status));
+  // The first message reached the empty chat, and its answer came back to A.
+  assert.equal(pageB.incoming.length, 1);
+  assert.match(pageB.incoming[0], /What is 2 \+ 2\?/);
+  assert.equal(pageA.incoming.length, 1);
+  assert.match(pageA.incoming[0], /The answer is 4\./);
+});
+
+// Bug 2: some sites show the message you just pasted as the newest "reply",
+// and keep showing it until the AI starts answering. That must not count as
+// the AI answering: the loop must wait for the real answer instead of
+// forwarding our own text back after 2 seconds of silence.
+test('the pasted message showing as the last reply is not counted as an answer', { timeout: 60000 }, async () => {
+  const pageA = makePage({ replies: ['start the loop'], answerFor: () => 'a' });
+  // Tab B puts our pasted message at the end of its reply list, where the
+  // reply selector points, and only later adds the AI's real answer.
+  const pageB = { replies: [], incoming: [], sends: 0, __injected: false, __inject() {} };
+  pageB.__handle = async (message) => {
+    if (message.type === 'readReply') {
+      const text = pageB.replies.length ? pageB.replies[pageB.replies.length - 1] : '';
+      return { ok: true, count: pageB.replies.length, text: text, code: '' };
+    }
+    if (message.type === 'deliver') {
+      pageB.sends += 1;
+      pageB.incoming.push(message.text);
+      pageB.replies.push(message.text); // the echo, shown as the newest reply
+      // The AI takes longer than the 2 second silence window to start.
+      setTimeout(() => pageB.replies.push('the real answer'), 3200);
+      return { ok: true };
+    }
+    if (message.type === 'getSiteState') return { ok: true, picks: { input: true, send: true, reply: true } };
+    return { error: 'unknown ' + message.type };
+  };
+
+  const { worker } = setup({ A: pageA, B: pageB }, baseSettings);
+  const started = worker.send({ type: 'start' });
+  const status = await worker.waitForIdle(30000);
+  await started;
+
+  assert.equal(status.tone, 'done', 'status was: ' + JSON.stringify(status));
+  assert.equal(pageA.incoming.length, 1);
+  // A gets the AI's answer, not its own message coming back.
+  assert.match(pageA.incoming[0], /the real answer/);
+  assert.ok(!/start the loop/.test(pageA.incoming[0]),
+    'A must not receive its own message back: ' + JSON.stringify(pageA.incoming));
+});
+
+// Bug 4: a closed Tab B used to be skipped by the pick check, so the run
+// started and then failed in the middle with a page error. It must be caught
+// before anything is sent, with the same plain words as Tab A.
+test('a closed Tab B is reported before the run starts', async () => {
+  const pageA = makePage({ replies: ['hello'], answerFor: () => 'a' });
+  const pageB = makePage({ replies: ['ready'], answerFor: () => 'b' });
+  const { worker, ids } = setup({ A: pageA, B: pageB }, baseSettings);
+  // Close Tab B by taking it out of the browser's tab list.
+  worker.chrome.__tabs.delete(ids.B);
+
+  const reply = await worker.send({ type: 'start' });
+  assert.ok(reply.error, 'the run must not start');
+  assert.match(reply.error, /Tab B is closed/);
+  assert.match(reply.error, /Make this Tab B/);
+  assert.equal(pageA.sends, 0, 'nothing is sent when a tab is closed');
+  assert.equal(pageB.sends, 0);
+});
+
+// A closed Tab A keeps its old plain message.
+test('a closed Tab A is reported before the run starts', async () => {
+  const pageA = makePage({ replies: ['hello'], answerFor: () => 'a' });
+  const pageB = makePage({ replies: ['ready'], answerFor: () => 'b' });
+  const { worker, ids } = setup({ A: pageA, B: pageB }, baseSettings);
+  worker.chrome.__tabs.delete(ids.A);
+
+  const reply = await worker.send({ type: 'start' });
+  assert.ok(reply.error, 'the run must not start');
+  assert.match(reply.error, /Tab A is closed/);
+  assert.match(reply.error, /Make this Tab A/);
+  assert.equal(pageA.sends, 0);
+  assert.equal(pageB.sends, 0);
+});
+
+// Bug 1: Tab B is a brand-new chat, so it has no AI reply at all yet. The
+// loop must wait for it instead of failing with "the AI reply was not found".
+test('a brand-new Tab B with no AI reply yet still works', { timeout: 60000 }, async () => {
+  const pageA = makePage({ replies: ['What is 2 + 2?'], answerFor: () => 'a' });
+  const pageB = makePage({ replies: [], answerFor: () => 'The answer is 4.' });
+  // 2 seconds is the shortest silence the settings allow, and 1 read per
+  // second in production; the test worker reads every 100 ms, so a reply
+  // settles quickly. The run is over as soon as B's answer is read.
+  const { worker } = setup({ A: pageA, B: pageB }, baseSettings);
+
+  // start resolves when the run is over, so do not await it here.
+  worker.send({ type: 'start' });
+  const status = await worker.waitForIdle(30000);
+
+  assert.equal(status.tone, 'done', 'status was: ' + JSON.stringify(status));
+  // The first message reached the empty chat, and its answer came back to A.
+  assert.equal(pageB.incoming.length, 1);
+  assert.match(pageB.incoming[0], /What is 2 \+ 2\?/);
+  assert.equal(pageA.incoming.length, 1);
+  assert.match(pageA.incoming[0], /The answer is 4\./);
+});
+
+// Bug 2: some sites show the message you just pasted as the newest "reply".
+// That must not count as the AI answering, so the loop keeps waiting for the
+// real answer instead of forwarding its own text back.
+test('the pasted message showing up as the last reply is not an answer', { timeout: 60000 }, async () => {
+  const pageA = makePage({ replies: ['start the loop'], answerFor: () => 'a' });
+  // Tab B shows our pasted message back, then the AI's real answer.
+  const pageB = makePage({ replies: [], answerFor: () => 'the real answer' });
+  const deliver = pageB.__handle;
+  pageB.__handle = async (message) => {
+    const result = await deliver(message);
+    if (message.type === 'deliver') {
+      // The echo is in the reply list right away, so the first read after
+      // pasting sees our own message as the newest reply.
+      pageB.replies.push(message.text);
+    }
+    return result;
+  };
+
+  const { worker } = setup({ A: pageA, B: pageB }, baseSettings);
+  const started = worker.send({ type: 'start' });
+  const status = await worker.waitForIdle(30000);
+  await started;
+
+  assert.equal(status.tone, 'done', 'status was: ' + JSON.stringify(status));
+  // The loop waited for the answer after the echo: A got the answer, not
+  // our own text coming back.
+  assert.equal(pageA.incoming.length, 1);
+  assert.match(pageA.incoming[0], /the real answer/);
+  assert.ok(!/start the loop/.test(pageA.incoming[0]), 'A must not get its own message back');
+});
+
 test('stop stops the run quickly and says so', { timeout: 60000 }, async () => {
   const pageA = makePage({ replies: ['start'], answerFor: () => 'a' });
   // B never finishes typing, so the loop would wait forever without Stop.

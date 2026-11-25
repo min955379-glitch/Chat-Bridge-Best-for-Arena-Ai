@@ -120,6 +120,53 @@ test('readReply reports a page that changed', async () => {
   assert.match(reply.error, /AI reply is not picked/);
 });
 
+// Bug 1: a brand-new chat has no AI reply yet. That is not an error, and it
+// must not stop the chat from being used as Tab A or Tab B.
+const EMPTY_CHAT_PAGE = `
+  <div id="app">
+    <main class="conversation" role="main">
+      <div class="message-row" data-message-author-role="user">
+        <div class="bubble"><p>Hello, first message.</p></div>
+      </div>
+    </main>
+    <form class="composer">
+      <div contenteditable="true" role="textbox" aria-label="Write a message" id="box"></div>
+      <button type="button" id="send" aria-label="Send message">Send</button>
+    </form>
+  </div>`;
+
+test('a chat with no AI reply yet reads as empty instead of failing', async () => {
+  const page = boot(EMPTY_CHAT_PAGE, { 'site_https://arena.ai/c': PICKS });
+  const reply = await page.send({ type: 'readReply' });
+  assert.equal(reply.ok, true, 'an empty chat is a normal reading');
+  assert.equal(reply.count, 0);
+  assert.equal(reply.text, '');
+  assert.equal(reply.code, '');
+  assert.equal(reply.error, undefined);
+});
+
+test('Test copy explains an empty chat in plain words, and the pick is kept', async () => {
+  const page = boot(EMPTY_CHAT_PAGE, { 'site_https://arena.ai/c': PICKS });
+  const copy = await page.send({ type: 'testCopy', key: 'https://arena.ai/c', settings: { mode: 'full' } });
+  assert.equal(copy.ok, true);
+  assert.equal(copy.count, 0);
+  assert.match(copy.error, /No AI reply was found on this page/);
+  assert.match(copy.error, /Pick AI reply/);
+
+  // The picker is not to blame yet: waiting for the AI to answer and trying
+  // again is the fix. But once the selector matched and then stopped, the
+  // message changes, because then the page really did move.
+  const working = await page.send({ type: 'readReply' });
+  assert.equal(working.count, 0);
+  await page.document.body.insertAdjacentHTML('beforeend',
+    '<div class="message-row" data-message-author-role="assistant"><p>The answer is 4.</p></div>');
+  const afterAnswer = await page.send({ type: 'readReply' });
+  assert.equal(afterAnswer.count, 1);
+  page.document.querySelectorAll('[data-message-author-role="assistant"]').forEach((el) => el.remove());
+  const copyAgain = await page.send({ type: 'testCopy', key: 'https://arena.ai/c', settings: { mode: 'full' } });
+  assert.match(copyAgain.error, /The AI reply is not on the page right now/);
+});
+
 test('the last code block of the newest reply is read on the page', async () => {
   const page = boot(CHAT_PAGE, { 'site_https://arena.ai/c': PICKS });
   // Use the testCopy helper with the "code" mode; the newest reply has none.

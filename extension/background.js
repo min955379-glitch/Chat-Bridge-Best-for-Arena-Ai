@@ -107,17 +107,43 @@ async function sendToTab(tabId, message) {
 }
 
 // Read the last reply in a tab: { ok, count, text, code }
+// An empty chat is a normal reading (count 0), not an error: a brand-new chat
+// must still be usable as Tab A or Tab B. Only a missing pick fails here.
 async function readTab(tabId) {
   const reply = await sendToTab(tabId, { type: 'readReply' });
   if (!reply) throw new Error('The page did not answer. Reload the tab and try again.');
   if (reply.error) throw new Error(reply.error);
   // Trust nothing from the page: keep only text and a number.
+  const count = Number(reply.count) || 0;
+  const text = typeof reply.text === 'string' ? reply.text : String(reply.text == null ? '' : reply.text);
   return {
     ok: true,
-    count: Number(reply.count) || 0,
-    text: typeof reply.text === 'string' ? reply.text : String(reply.text == null ? '' : reply.text),
-    code: typeof reply.code === 'string' ? reply.code : ''
+    count: count,
+    text: count === 0 ? '' : text,
+    code: count === 0 ? '' : (typeof reply.code === 'string' ? reply.code : '')
   };
+}
+
+// Two pieces of text are "the same" when only spacing and line breaks differ.
+function normaliseForCompare(text) {
+  return String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+}
+
+// Did the tab's newest reply change into something we did not just send?
+// count 0 means "the page shows no reply at all", which is not our message
+// and is not the AI answering either.
+function isForeignChange(current, sentText) {
+  if (current.count === 0) return false;
+  const now = normaliseForCompare(current.text);
+  if (!now) return false;
+  // Our own pasted message (or a piece of it) appeared as the newest reply:
+  // wait for the AI's answer instead of forwarding our own text back.
+  const sent = normaliseForCompare(sentText);
+  if (sent) {
+    if (now === sent) return false;
+    if (now.startsWith(sent)) return false;
+  }
+  return true;
 }
 
 // Put a message into a tab and press send.
@@ -182,7 +208,7 @@ async function readPickedText(run, role) {
 }
 
 // Wait until the tab produces a NEW reply and stops changing.
-async function waitForNewReply(run, role, baseline) {
+async function waitForNewReply(run, role, baseline, sentText) {
   const tabId = run.roles[role];
   const silence = run.settings.silence;
   const deadline = Date.now() + run.settings.timeout * 1000;
@@ -190,23 +216,30 @@ async function waitForNewReply(run, role, baseline) {
   let lastText = '';
   let lastChange = 0;
   let lastWritten = '';
+  // The message we pasted, so we do not mistake it for the AI's answer.
+  const sent = normaliseForCompare(sentText);
 
   for (;;) {
     checkStop();
     const reply = await readTab(tabId);
     const now = Date.now();
-    const text = typeof reply.text === 'string' ? reply.text : '';
-    const countChanged = reply.count !== baseline.count;
-    const textChanged = text !== baseline.text;
 
-    if (!seen && (countChanged || textChanged)) {
+    // A change compared with what was on the page before we pasted, that is
+    // also not our own message coming back.
+    const changed = reply.count !== baseline.count || reply.text !== baseline.text;
+
+    if (!seen && changed && isForeignChange(reply, sent)) {
       seen = true;
-      lastText = text;
+      lastText = reply.text;
       lastChange = now;
       await addLog(roleTitle(run, role) + ' started answering.');
-    } else if (seen && text !== lastText) {
-      lastText = text;
-      lastChange = now;
+    } else if (seen) {
+      // While waiting, ignore a return to "no reply" and an echo of our own
+      // message: only real text from the AI restarts the silence counter.
+      if (isForeignChange(reply, sent) && reply.text !== lastText) {
+        lastText = reply.text;
+        lastChange = now;
+      }
     }
 
     // Whole seconds with no change in the reply.
@@ -223,7 +256,9 @@ async function waitForNewReply(run, role, baseline) {
     }
 
     if (seen && silentFor >= needed && String(lastText || '').trim()) {
-      return reply;
+      // Return the reading that ended the wait, so a reply that finished at
+      // the same moment is not missed.
+      return reply.count > 0 ? reply : Object.assign({}, reply, { count: 1, text: lastText });
     }
 
     if (now > deadline) {
@@ -256,7 +291,9 @@ async function forward(run, fromRole, toRole, text) {
   await addLog('Sending ' + message.length + ' characters from ' + fromRole + ' to ' + toRole + '.');
   await deliverToTab(toTab, message);
 
-  const reply = await waitForNewReply(run, toRole, baseline);
+  // The waiter gets the sent text, so a page that shows our message back as
+  // the newest "reply" is not mistaken for the AI answering.
+  const reply = await waitForNewReply(run, toRole, baseline, message);
   const mode = toRole === 'A' ? settings.copyModeA : settings.copyModeB;
   const picked = applyMode(reply, mode, { start: settings.markerStart, end: settings.markerEnd });
   if (picked.error) {
@@ -333,6 +370,9 @@ async function runApiMode(run) {
   let outgoing = await readPickedText(run, 'A');
   let previous = outgoing;
   const memory = []; // { role: 'user' | 'assistant', content }
+  // One cooldown table for the whole run, so a provider that answered 429 in
+  // an earlier round is still skipped in the later rounds.
+  const cooldowns = { gemini: 0, grok: 0 };
 
   for (let round = 1; round <= rounds; round++) {
     checkStop();
@@ -350,7 +390,7 @@ async function runApiMode(run) {
       grokKey: settings.grokKey,
       grokModel: settings.grokModel,
       systemPrompt: settings.systemPrompt
-    });
+    }, { cooldowns: cooldowns });
     for (const note of answer.notes || []) await addLog(note);
     const providerName = Common.providerLabel(answer.provider);
     await addLog(providerName + ' answered in ' + Math.round((Date.now() - startedAt) / 1000) +
@@ -360,8 +400,9 @@ async function runApiMode(run) {
     // 2. Paste the answer into Tab A and wait for Tab A's own answer.
     await setStatus(run.statusPrefix + providerName + ' answered. Pasting it into Tab A', 'running');
     const baseline = await readTab(run.roles.A);
-    await deliverToTab(run.roles.A, Common.wrapMessage(settings.prefix, answer.text, settings.suffix));
-    const reply = await waitForNewReply(run, 'A', baseline);
+    const pastedIntoA = Common.wrapMessage(settings.prefix, answer.text, settings.suffix);
+    await deliverToTab(run.roles.A, pastedIntoA);
+    const reply = await waitForNewReply(run, 'A', baseline, pastedIntoA);
     const picked = applyMode(reply, settings.copyModeA, {
       start: settings.markerStart, end: settings.markerEnd
     });
@@ -385,12 +426,17 @@ async function runApiMode(run) {
 }
 
 // ---------- checking everything before a run ----------
-async function tabInfo(tabId) {
+async function tabInfo(tabId, role) {
   try {
     const tab = await chrome.tabs.get(tabId);
     return { ok: true, tab: tab, key: Common.siteKeyFor(tab.url || ''), label: Common.siteLabel(tab.url || '') };
   } catch (err) {
-    return { ok: false, error: 'That tab is closed. Press "Make this Tab A" (or B) on the tab you want.' };
+    // Say which tab and which button, in plain words.
+    const which = role === 'A' || role === 'B' ? 'Tab ' + role : 'That tab';
+    return {
+      ok: false,
+      error: which + ' is closed. Open the chat you want and press "Make this ' + which + '" again.'
+    };
   }
 }
 
@@ -407,14 +453,14 @@ async function validateRun(settings) {
   }
   if (problems.length) return { problems: problems };
 
-  const infoA = await tabInfo(roles.A);
-  if (!infoA.ok) problems.push('Tab A: ' + infoA.error);
-
+  // Check every tab that this mode needs, and report a closed one right away.
   const need = settings.mode === 'tab' ? ['A', 'B'] : ['A'];
   for (const role of need) {
-    const tabId = roles[role];
-    const info = await tabInfo(tabId);
-    if (!info.ok) continue;
+    const info = await tabInfo(roles[role], role);
+    if (!info.ok) {
+      problems.push(info.error);
+      continue;
+    }
     const stored = await chrome.storage.local.get(Common.pickStorageKey(info.key));
     const picks = stored[Common.pickStorageKey(info.key)] || {};
     const missing = [];
@@ -461,7 +507,7 @@ async function startRun() {
   };
   for (const role of ['A', 'B']) {
     if (!roles[role]) continue;
-    const info = await tabInfo(roles[role]);
+    const info = await tabInfo(roles[role], role);
     if (info.ok) run.titles[roles[role]] = info.tab.title || info.label;
   }
   activeRun = run;

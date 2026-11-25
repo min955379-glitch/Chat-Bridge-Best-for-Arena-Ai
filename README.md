@@ -75,6 +75,9 @@ no account**. Everything is stored on your own computer.
 9. Back in the first tab's popup, set **Rounds** to `3`, choose a **Copy mode** for A and
    B, then press **Start**.
 
+> **Before you press Start:** both chats should already contain at least one AI reply, and
+> the picks are saved separately for `arena.ai/c` and `arena.ai/agent`.
+
 Watch the status line. It tells you exactly what is happening: "Round 1/3: sending A → B",
 "waiting for B to finish (12s of 20s silence)", "Done".
 
@@ -224,6 +227,7 @@ server ever echoes one back.
 | "Chat box not found. The page may have changed" | The site was redesigned. Press **Clear picks** and pick the three spots again. |
 | "The chat box stayed empty after pasting" | You clicked a wrapper, not the real box. Pick again and click directly inside the box. |
 | Pasted text appears but the message never sends | The send button is a different element. Pick **Pick send button** again, clicking the arrow itself. |
+| "No AI reply was found on this page" on **Test copy** | That chat has no answer yet. Wait for the AI to answer once, then press **Test copy** again. A run started on an empty chat simply waits for the first answer, so this does not block Start. |
 | The loop says "Timed out waiting for Tab B" | 1) Put both chats in two separate Chrome windows. 2) Raise **Seconds of silence**. 3) Raise **Timeout**. 4) Check that you picked the **AI reply**, not the user message. |
 | The AI answer is cut in half | The reply selector matches a small inner part. Re-pick the reply, pressing Arrow Up so the blue box covers the whole answer. |
 | "It matches 1 reply right now" is wrong | Re-pick and press Arrow Up until it says "matches N replies". |
@@ -317,7 +321,7 @@ npm install     # installs jsdom, only for the tests
 npm test
 ```
 
-What is covered (113 tests):
+What is covered (125 tests):
 
 * `selectors.test.js` — hash classes are rejected, replies match every answer, ids with
   digits are ignored, the structural fallback works, and the builder is checked against
@@ -325,17 +329,20 @@ What is covered (113 tests):
 * `extract.test.js` — the three copy modes, marker edge cases, unfinished-code detection.
 * `common.test.js` — site keys (`/c` vs `/agent`), defaults, clamping, key hiding.
 * `api-client.test.js` — request shapes for both providers, retry once, fallback, 429
-  cooldown, empty answers, both-fail message.
+  cooldown that is **remembered across rounds**, empty answers, both-fail message.
 * `content.test.js` — the real `content.js` in a page: React-safe textarea fill,
-  contenteditable insert, Enter fallback, disabled send button, multi-line text.
+  contenteditable insert, Enter fallback, disabled send button, multi-line text, and a
+  brand-new chat with **no AI reply yet** reading as an empty reply instead of an error.
 * `picker.test.js` — the real picker: hover, Arrow Up/Down, click to save, Esc to cancel,
   and that the page never receives the clicks.
 * `popup.test.js` — the real `popup.html` in jsdom: every control, saving settings, ticks,
   Start/Stop wiring, plain-language errors.
 * `loop.test.js` — the real `background.js` loop end to end: 2 rounds between two fake
   pages, copy modes, prefix/suffix, Stop, timeout, stop-word, loop detection, replies that
-  start empty, content-script re-injection, API mode with fallback, and API memory that
-  always starts with the user's turn.
+  start empty, content-script re-injection, API mode with fallback, API memory that always
+  starts with the user's turn, a **brand-new Tab B with no reply yet**, our **own pasted
+  message** showing up as the newest reply (it is not counted as an answer), and a
+  **closed Tab B** reported before anything is sent.
 
 There is also `dev/smoke.js`, which checks that the manifest is complete, every file it
 names exists, all JavaScript parses, the service worker can load its helpers, no API key

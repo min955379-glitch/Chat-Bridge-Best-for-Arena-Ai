@@ -1,7 +1,8 @@
 // dev/tests/api-client.test.js
 // Checks the Gemini and Grok request shapes and the fallback rules:
-// retry once, then switch provider, 60 second cooldown after a 429, and a
-// plain error when both providers fail.
+// retry once, then switch provider, 60 second cooldown after a 429, a
+// cooldown that is remembered across rounds, and a plain error when both
+// providers fail.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -38,6 +39,12 @@ const httpError = (status) => ({ type: 'http', status, body: { error: { message:
 
 const noWait = { retryWaitMs: 0, sleep: async () => {} };
 
+// A fresh cooldown table per call, so one test cannot change the next one.
+// Tests that check the cooldown itself pass their own table and clock.
+function deps(fetchStub, extra) {
+  return Object.assign({ fetch: fetchStub, cooldowns: { gemini: 0, grok: 0 } }, noWait, extra || {});
+}
+
 test('Gemini request uses the documented URL, header and body', () => {
   const req = Api.buildGeminiRequest('gemini-2.5-flash', [
     { role: 'assistant', content: 'hello' },
@@ -71,9 +78,8 @@ test('Grok request uses the OpenAI compatible body', () => {
 
 test('a normal Gemini answer is returned with the provider name', async () => {
   const sent = [];
-  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings, Object.assign({
-    fetch: fakeFetch([geminiOk('hello there')], sent)
-  }, noWait));
+  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings,
+    deps(fakeFetch([geminiOk('hello there')], sent)));
   assert.equal(result.text, 'hello there');
   assert.equal(result.provider, 'gemini');
   assert.equal(result.fellBack, false);
@@ -83,9 +89,8 @@ test('a normal Gemini answer is returned with the provider name', async () => {
 
 test('a 500 is retried once, then answered on the second try', async () => {
   const sent = [];
-  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings, Object.assign({
-    fetch: fakeFetch([httpError(500), geminiOk('second time')], sent)
-  }, noWait));
+  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings,
+    deps(fakeFetch([httpError(500), geminiOk('second time')], sent)));
   assert.equal(result.text, 'second time');
   assert.equal(sent.length, 2);
   assert.ok(result.notes.some((n) => /Trying once more/.test(n)));
@@ -93,9 +98,8 @@ test('a 500 is retried once, then answered on the second try', async () => {
 
 test('a failing primary falls back to the backup provider', async () => {
   const sent = [];
-  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings, Object.assign({
-    fetch: fakeFetch([httpError(500), httpError(500), grokOk('grok answers')], sent)
-  }, noWait));
+  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings,
+    deps(fakeFetch([httpError(500), httpError(500), grokOk('grok answers')], sent)));
   assert.equal(result.text, 'grok answers');
   assert.equal(result.provider, 'grok');
   assert.equal(result.fellBack, true);
@@ -106,53 +110,87 @@ test('a failing primary falls back to the backup provider', async () => {
 test('a 429 puts the provider to rest and the backup answers at once', async () => {
   const sent = [];
   let clock = 1000;
-  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings, Object.assign({
-    fetch: fakeFetch([httpError(429), grokOk('backup')], sent),
-    now: () => clock
-  }, noWait));
+  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings,
+    deps(fakeFetch([httpError(429), grokOk('backup')], sent), { now: () => clock }));
   assert.equal(result.provider, 'grok');
   // A 429 is not retried on the same provider, so only two calls happen.
   assert.equal(sent.length, 2);
   assert.ok(result.notes.some((n) => /rate limit/.test(n)));
 });
 
-test('a second question within 60 seconds skips the provider that got a 429', async () => {
-  // The cooldown lives as long as one call, so this test checks the message.
+test('a 429 with no backup key explains the problem clearly in plain words', async () => {
   // A 429 on a request with no backup key must explain the problem clearly.
   const oneSide = Object.assign({}, settings, { grokKey: '' });
   await assert.rejects(
-    () => Api.requestWithFallback([{ role: 'user', content: 'hi' }], oneSide, Object.assign({
-      fetch: fakeFetch([httpError(429)], [])
-    }, noWait)),
+    () => Api.requestWithFallback([{ role: 'user', content: 'hi' }], oneSide,
+      deps(fakeFetch([httpError(429)], []))),
     (err) => /Gemini|limit/.test(err.message)
   );
 });
 
+// Bug 3: the cooldown used to be created inside one request, so the next
+// round forgot it and called the provider that had just said "429" again.
+test('a rate limit in round 1 still skips Gemini in round 2', async () => {
+  const sent = [];
+  let clock = 1000;
+  // One table and one fake clock for both rounds, as a real run does.
+  const runDeps = deps(null, { now: () => clock });
+  const fetchStub = fakeFetch([httpError(429), grokOk('grok round 1'), grokOk('grok round 2')], sent);
+  runDeps.fetch = fetchStub;
+
+  const first = await Api.requestWithFallback([{ role: 'user', content: 'one' }], settings, runDeps);
+  assert.equal(first.provider, 'grok');
+  assert.equal(sent.length, 2, 'round 1: Gemini 429, then Grok');
+  assert.equal(sent[0].url.includes('generativelanguage'), true);
+
+  // Three seconds later, well inside the 60 second rest.
+  clock += 3000;
+  const second = await Api.requestWithFallback([{ role: 'user', content: 'two' }], settings, runDeps);
+  assert.equal(second.provider, 'grok');
+  assert.equal(second.text, 'grok round 2');
+  // The important part: round 2 did not call Gemini at all.
+  assert.equal(sent.length, 3, 'round 2 calls only Grok');
+  assert.equal(sent[2].url, 'https://api.x.ai/v1/chat/completions');
+  assert.ok(second.notes.some((n) => /resting after a rate limit/.test(n)));
+});
+
+test('a rate limit does not skip Gemini for ever', async () => {
+  const sent = [];
+  let clock = 1000;
+  const runDeps = deps(null, { now: () => clock });
+  runDeps.fetch = fakeFetch([httpError(429), grokOk('backup once'), geminiOk('gemini is back')], sent);
+
+  await Api.requestWithFallback([{ role: 'user', content: 'one' }], settings, runDeps);
+  // Two minutes later the rest is over, so Gemini is tried again.
+  clock += 120000;
+  const later = await Api.requestWithFallback([{ role: 'user', content: 'two' }], settings, runDeps);
+  assert.equal(later.provider, 'gemini');
+  assert.equal(later.text, 'gemini is back');
+  assert.equal(sent.length, 3);
+});
+
 test('an empty Gemini answer counts as a failure and uses the backup', async () => {
   const sent = [];
-  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings, Object.assign({
-    fetch: fakeFetch([{ type: 'http', status: 200, body: { candidates: [] } },
+  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings,
+    deps(fakeFetch([{ type: 'http', status: 200, body: { candidates: [] } },
       { type: 'http', status: 200, body: { candidates: [] } },
-      grokOk('grok to the rescue')], sent)
-  }, noWait));
+      grokOk('grok to the rescue')], sent)));
   assert.equal(result.provider, 'grok');
   assert.equal(result.text, 'grok to the rescue');
 });
 
 test('a network error is retried, then the backup is used', async () => {
   const sent = [];
-  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings, Object.assign({
-    fetch: fakeFetch([{ type: 'network' }, { type: 'network' }, grokOk('ok')], sent)
-  }, noWait));
+  const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings,
+    deps(fakeFetch([{ type: 'network' }, { type: 'network' }, grokOk('ok')], sent)));
   assert.equal(result.provider, 'grok');
   assert.equal(sent.length, 3);
 });
 
 test('when both providers fail the error is plain and mentions both', async () => {
   await assert.rejects(
-    () => Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings, Object.assign({
-      fetch: fakeFetch([httpError(500), httpError(500), httpError(503), httpError(503)], [])
-    }, noWait)),
+    () => Api.requestWithFallback([{ role: 'user', content: 'hi' }], settings,
+      deps(fakeFetch([httpError(500), httpError(500), httpError(503), httpError(503)], []))),
     (err) => /Both API providers failed/.test(err.message) && /Gemini/.test(err.message)
   );
 });
@@ -160,9 +198,8 @@ test('when both providers fail the error is plain and mentions both', async () =
 test('a missing key stops early with a clear message', async () => {
   await assert.rejects(
     () => Api.requestWithFallback([{ role: 'user', content: 'hi' }],
-      Object.assign({}, settings, { geminiKey: '', grokKey: '' }), Object.assign({
-        fetch: fakeFetch([geminiOk('x')], [])
-      }, noWait)),
+      Object.assign({}, settings, { geminiKey: '', grokKey: '' }),
+      deps(fakeFetch([geminiOk('x')], []))),
     (err) => /No API key saved for Gemini/.test(err.message)
   );
 });
@@ -170,9 +207,8 @@ test('a missing key stops early with a clear message', async () => {
 test('a missing primary key falls back to the backup that has one', async () => {
   const sent = [];
   const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }],
-    Object.assign({}, settings, { geminiKey: '' }), Object.assign({
-      fetch: fakeFetch([grokOk('from grok')], sent)
-    }, noWait));
+    Object.assign({}, settings, { geminiKey: '' }),
+    deps(fakeFetch([grokOk('from grok')], sent)));
   assert.equal(result.provider, 'grok');
   assert.equal(sent.length, 1);
 });
@@ -180,9 +216,8 @@ test('a missing primary key falls back to the backup that has one', async () => 
 test('the Grok primary works the other way round', async () => {
   const sent = [];
   const result = await Api.requestWithFallback([{ role: 'user', content: 'hi' }],
-    Object.assign({}, settings, { provider: 'grok' }), Object.assign({
-      fetch: fakeFetch([grokOk('grok first')], sent)
-    }, noWait));
+    Object.assign({}, settings, { provider: 'grok' }),
+    deps(fakeFetch([grokOk('grok first')], sent)));
   assert.equal(result.provider, 'grok');
   assert.equal(sent[0].url, 'https://api.x.ai/v1/chat/completions');
 });
@@ -192,5 +227,6 @@ test('HTTP status codes are explained in plain words', () => {
   assert.match(Api.explainStatus(401), /key was rejected/);
   assert.match(Api.explainStatus(403), /key was rejected/);
   assert.match(Api.explainStatus(404), /model name/);
+  assert.match(Api.explainStatus(500), /service is having problems/);
   assert.match(Api.explainStatus(503), /service is having problems/);
 });
