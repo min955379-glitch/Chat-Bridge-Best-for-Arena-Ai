@@ -65,7 +65,9 @@ test('the popup has every control the brief asks for', async () => {
     'rounds', 'silence', 'copy-mode-a', 'copy-mode-b', 'marker-start', 'marker-end',
     'prefix', 'suffix', 'stop-if-same', 'stop-word', 'mode', 'timeout', 'max-rounds',
     'provider', 'gemini-key', 'gemini-model', 'grok-key', 'grok-model', 'memory',
-    'system-prompt', 'start', 'stop', 'status', 'log', 'copy-log'
+    'system-prompt', 'start', 'stop', 'status', 'log', 'copy-log',
+    'helper-on', 'helper-body', 'helper-roles', 'helper-detect', 'helper-detect-result',
+    'helper-best', 'helper-stop', 'goal', 'helper-stop-every', 'helper-max-calls'
   ];
   for (const id of ids) assert.ok(document.getElementById(id), 'missing control: ' + id);
   // The popup is narrow, as the brief asks.
@@ -283,4 +285,161 @@ test('Clear picks removes the picks for this site only', async () => {
   assert.equal(document.getElementById('tick-input').textContent, '○');
 });
 
+// ---------- Smart Helper section ----------
+test('the Smart Helper is off by default and its options are hidden', async () => {
+  const { document } = openPopup();
+  await wait(30);
+  assert.equal(document.getElementById('helper-on').checked, false, 'off by default');
+  assert.equal(document.getElementById('helper-body').hidden, true, 'options stay out of the way');
+  // The note about sending text to Google or xAI is always visible.
+  const intro = document.querySelector('.helper-intro');
+  assert.match(intro.textContent, /Google or xAI/);
+});
 
+test('switching the helper on shows its options and saves the switch', async () => {
+  const { document, chrome, event } = openPopup();
+  await wait(30);
+  const master = document.getElementById('helper-on');
+  master.checked = true;
+  master.dispatchEvent(event('change'));
+  await wait(50);
+  assert.equal(document.getElementById('helper-body').hidden, false, 'shown at once');
+  // The settings save a moment after the last change (350 ms debounce).
+  await wait(450);
+  const saved = chrome.__store.settings;
+  assert.equal(saved.helperOn, true);
+  // The part checkboxes are still off: switching the master on alone is safe.
+  assert.equal(saved.helperRoles, false);
+  assert.equal(saved.helperBest, false);
+  assert.equal(saved.helperStop, false);
+});
+
+test('the goal box and the two limits are saved with the settings', async () => {
+  const { document, chrome, event } = openPopup();
+  await wait(30);
+  document.getElementById('helper-on').checked = true;
+  document.getElementById('helper-stop').checked = true;
+  document.getElementById('goal').value = 'Build a to-do app.';
+  document.getElementById('helper-stop-every').value = '3';
+  document.getElementById('helper-max-calls').value = '12';
+  for (const id of ['helper-on', 'helper-stop', 'goal', 'helper-stop-every', 'helper-max-calls']) {
+    document.getElementById(id).dispatchEvent(event('change'));
+  }
+  await wait(500);
+  const saved = chrome.__store.settings;
+  assert.equal(saved.helperStop, true);
+  assert.equal(saved.goal, 'Build a to-do app.');
+  assert.equal(saved.helperStopEvery, 3);
+  assert.equal(saved.helperMaxCalls, 12);
+});
+
+test('a saved helper setup is shown again when the popup opens', async () => {
+  const { document } = openPopup({
+    settings: {
+      helperOn: true, helperStop: true, goal: 'Build a to-do app.',
+      helperStopEvery: 4, helperMaxCalls: 10
+    }
+  });
+  await wait(40);
+  assert.equal(document.getElementById('helper-on').checked, true);
+  assert.equal(document.getElementById('helper-body').hidden, false);
+  assert.equal(document.getElementById('helper-stop').checked, true);
+  assert.equal(document.getElementById('goal').value, 'Build a to-do app.');
+  assert.equal(document.getElementById('helper-stop-every').value, '4');
+  assert.equal(document.getElementById('helper-max-calls').value, '10');
+});
+
+test('the helper settings in storage never switch a part on by itself', async () => {
+  // A part saved as on, with the master switch off, must load as off.
+  const { document } = openPopup({ settings: { helperOn: false, helperStop: true } });
+  await wait(30);
+  assert.equal(document.getElementById('helper-on').checked, false);
+  assert.equal(document.getElementById('helper-stop').checked, false);
+});
+
+test('the detect button shows the plain sentence and refreshes the roles', async () => {
+  // openPopup(store, options): the background answers go in the second one.
+  const { document, event } = openPopup(
+    { settings: { helperOn: true, helperRoles: true } },
+    {
+      backgroundReplies: {
+        state: { ok: true, roles: { A: 42, B: null } },
+        detectRoles: {
+          ok: true,
+          brain: 'B',
+          message: 'Right window (arena.ai/agent) looks like the brain, so Left window (arena.ai/c) becomes the worker (Tab B).'
+        }
+      }
+    });
+  await wait(40);
+  document.getElementById('helper-on').checked = true;
+  document.getElementById('helper-roles').checked = true;
+  for (const id of ['helper-on', 'helper-roles']) {
+    document.getElementById(id).dispatchEvent(event('change'));
+  }
+  await wait(50);
+  const button = document.getElementById('helper-detect');
+  assert.equal(button.disabled, false, 'the button is usable when the part is ticked');
+  button.dispatchEvent(event('click'));
+  // The button saves the settings first, then asks the worker, so give the
+  // two round trips time to finish.
+  await wait(600);
+  const result = document.getElementById('helper-detect-result');
+  assert.match(result.textContent, /looks like the brain/);
+  assert.match(result.className, /detect-good/);
+});
+
+test('a failed detection is shown in plain words, not thrown away', async () => {
+  const { document, event } = openPopup(
+    { settings: { helperOn: true, helperRoles: true } },
+    {
+      backgroundReplies: {
+        detectRoles: { error: 'The Smart Helper could not tell which window is the brain: unclear. Nothing was changed.' }
+      }
+    });
+  await wait(40);
+  document.getElementById('helper-on').checked = true;
+  document.getElementById('helper-roles').checked = true;
+  for (const id of ['helper-on', 'helper-roles']) {
+    document.getElementById(id).dispatchEvent(event('change'));
+  }
+  await wait(50);
+  const button = document.getElementById('helper-detect');
+  button.dispatchEvent(event('click'));
+  await wait(600);
+  const result = document.getElementById('helper-detect-result');
+  assert.match(result.textContent, /Nothing was changed/);
+  assert.match(result.className, /detect-bad/);
+  assert.equal(button.disabled, false, 'the button works again after a failure');
+});
+
+test('the best-answer checkbox saves with the rest of the helper settings', async () => {
+  const { document, chrome, event } = openPopup();
+  await wait(30);
+  document.getElementById('helper-on').checked = true;
+  document.getElementById('helper-best').checked = true;
+  for (const id of ['helper-on', 'helper-best']) {
+    document.getElementById(id).dispatchEvent(event('change'));
+  }
+  await wait(500);
+  const saved = chrome.__store.settings;
+  assert.equal(saved.helperBest, true);
+  // The other parts stay off, as they were.
+  assert.equal(saved.helperStop, false);
+  assert.equal(saved.helperRoles, false);
+});
+
+test('the three helper parts show as ticked when they were saved', async () => {
+  const { document } = openPopup({
+    settings: {
+      helperOn: true, helperRoles: true, helperBest: true, helperStop: true,
+      goal: 'Finish the app.', helperStopEvery: 2, helperMaxCalls: 25
+    }
+  });
+  await wait(40);
+  assert.equal(document.getElementById('helper-roles').checked, true);
+  assert.equal(document.getElementById('helper-best').checked, true);
+  assert.equal(document.getElementById('helper-stop').checked, true);
+  assert.equal(document.getElementById('helper-stop-every').value, '2');
+  assert.equal(document.getElementById('helper-max-calls').value, '25');
+});

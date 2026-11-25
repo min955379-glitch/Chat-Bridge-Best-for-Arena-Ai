@@ -332,3 +332,90 @@ test('two helper files load only once (double injection is harmless)', () => {
   const after = page.chrome.__listeners('runtime.onMessage').length;
   assert.equal(after, before);
 });
+
+// ---------- Smart Helper part 2: the newest group of answer cards ----------
+// Arena battle mode shows several answer cards for one turn: they are
+// siblings that share the parent of the last match.
+const BATTLE_PAGE = `
+  <div id="app">
+    <main class="conversation" role="main">
+      <div class="turn-pair">
+        <div class="message-row" data-message-author-role="user">
+          <div class="bubble"><p>Write a function that adds two numbers.</p></div>
+        </div>
+        <div class="answer-card" data-message-author-role="assistant" data-card="1">
+          <div class="prose"><p>Short answer: a + b.</p></div>
+        </div>
+      </div>
+      <div class="turn-pair">
+        <div class="message-row" data-message-author-role="user">
+          <div class="bubble"><p>Now do it again, better.</p></div>
+        </div>
+        <div class="answer-card" data-message-author-role="assistant" data-card="1">
+          <div class="prose"><p>First card of the new turn, the weaker one.</p></div>
+        </div>
+        <div class="answer-card" data-message-author-role="assistant" data-card="2">
+          <div class="prose">
+            <p>Second card of the new turn: the complete answer.</p>
+            <pre><code>function add(a, b) { return a + b; }</code></pre>
+          </div>
+        </div>
+      </div>
+    </main>
+    <form class="composer">
+      <div contenteditable="true" role="textbox" aria-label="Write a message" id="box"></div>
+      <button type="button" id="send" aria-label="Send message">Send</button>
+    </form>
+  </div>`;
+
+test('readReplyGroup returns every card of the newest turn only', async () => {
+  const page = boot(BATTLE_PAGE, { 'site_https://arena.ai/c': PICKS });
+  const group = await page.send({ type: 'readReplyGroup' });
+  assert.equal(group.ok, true);
+  assert.equal(group.count, 2, 'only the two cards of the newest turn');
+  assert.match(group.cards[0].text, /First card of the new turn/);
+  assert.match(group.cards[1].text, /Second card of the new turn/);
+  // The older turn is never included.
+  assert.ok(!group.cards.some((card) => /Short answer/.test(card.text)));
+  // Each card carries its own code block.
+  assert.match(group.cards[1].code, /function add/);
+  assert.equal(group.cards[0].code, '');
+});
+
+// A page where the newest answer really is alone in its own turn container.
+const SINGLE_TURN_PAGE = `
+  <div id="app">
+    <main class="conversation" role="main">
+      <div class="turn-pair">
+        <div class="message-row" data-message-author-role="user"><p>First question.</p></div>
+        <div class="message-row" data-message-author-role="assistant"><p>The first answer.</p></div>
+      </div>
+      <div class="turn-pair">
+        <div class="message-row" data-message-author-role="user"><p>Second question.</p></div>
+        <div class="message-row" data-message-author-role="assistant"><p>The second answer.</p></div>
+      </div>
+    </main>
+  </div>`;
+
+test('readReplyGroup with one answer returns that one card', async () => {
+  const page = boot(SINGLE_TURN_PAGE, { 'site_https://arena.ai/c': PICKS });
+  const group = await page.send({ type: 'readReplyGroup' });
+  assert.equal(group.ok, true);
+  assert.equal(group.count, 1, 'the newest answer is alone in its turn');
+  assert.match(group.cards[0].text, /The second answer/);
+});
+
+test('readReplyGroup on an empty chat returns no cards and no error', async () => {
+  const page = boot(EMPTY_CHAT_PAGE, { 'site_https://arena.ai/c': PICKS });
+  const group = await page.send({ type: 'readReplyGroup' });
+  assert.equal(group.ok, true);
+  assert.equal(group.count, 0);
+  assert.equal(group.cards.length, 0, 'no cards at all');
+});
+
+test('readReplyGroup asks for a pick first when the reply is not picked', async () => {
+  const page = boot(CHAT_PAGE, { 'site_https://arena.ai/c': {} });
+  const group = await page.send({ type: 'readReplyGroup' });
+  assert.equal(group.ok, false);
+  assert.match(group.error, /AI reply is not picked/);
+});

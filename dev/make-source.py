@@ -17,6 +17,7 @@ FILES = [
     ('selectors.js', 'js'),
     ('extract.js', 'js'),
     ('api-client.js', 'js'),
+    ('helper.js', 'js'),
     ('common.js', 'js'),
     ('popup.html', 'html'),
     ('popup.js', 'js'),

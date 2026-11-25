@@ -176,6 +176,13 @@ Reply with your next message, wrapped between START and END.
 | Max rounds safety limit | 100 | Hard cap, so a typo cannot start 10 000 rounds |
 | Stop if the new reply is identical to the previous one | off | Catches two AIs repeating themselves |
 | Stop when the reply contains | empty | For example `DONE` |
+| Smart Helper (master) | off | Switches on the three optional helpers below |
+| Auto detect brain and worker | off | Part 1: the brain becomes Tab A, the worker Tab B |
+| Pick the best answer | off | Part 2: several answer cards, the best one is forwarded |
+| Auto stop when done | off | Part 3: stops the loop when the project goal is finished |
+| Project goal | empty | The plain-English goal the two AIs must finish |
+| Check every N rounds | 1 | How often part 3 asks the API |
+| Max helper calls per run | 30 | A hard limit for the whole run |
 
 **Seconds of silence:** use the default 8 for normal chat pages. For **Arena agent mode**
 use **20 to 30**, because an agent goes quiet while it runs tools and would otherwise look
@@ -220,7 +227,55 @@ server ever echoes one back.
 
 ---
 
-## 7. Common problems
+## 7. Smart Helper (optional)
+
+Three optional helpers that make the loop a little smarter. They use the **same Gemini or
+Grok key** as API mode, with the same automatic fallback, but they are **off by default**
+and Tab to Tab mode works exactly as before with no keys at all.
+
+Switch on **Turn on the Smart Helper** in the popup, then tick the parts you want:
+
+**Auto detect brain and worker.** Press **Auto detect brain and worker**. Chat Bridge reads
+the last AI reply and the last user message of both tabs, asks the API which window is
+planning and instructing (the *brain*) and which is doing the work (the *worker*), and sets
+the roles: the brain becomes Tab A, the worker becomes Tab B. The result appears in plain
+words, for example *"Right window (arena.ai/agent) looks like the brain, so Left window
+(arena.ai/c) becomes the worker (Tab B). B writes the plan."* The normal **Make this Tab A /
+B** buttons still work, so you can always change it by hand. If the answer is unclear or the
+API fails you are told, and **nothing is changed**.
+
+**Pick the best answer.** Some chats (Arena battle mode) show several answer cards for the
+same turn. Chat Bridge reads **all** the cards of the newest turn — the ones that share the
+parent of the last match — and asks the API which one is best for your project goal. Only
+that card is forwarded. With a single answer the API is never asked. The log shows which
+card was chosen and why, for example *"Smart Helper (Gemini) chose card 2 of 2: card 2 has
+the complete function."*
+
+**Auto stop when done.** Type the **Project goal** (what the two AIs must finish). After
+every round (or every N rounds — the default is 1) Chat Bridge asks the API whether the
+project is finished. When it answers DONE, the loop stops and the reason appears in the
+status line: *"Stopped by the Smart Helper: the to-do app is finished and tested (Gemini)."*
+A muddled answer is never treated as finished, so the loop keeps going.
+
+**Safety rules, every time:**
+
+* **Max helper calls per run** (default 30). When the budget is used up the helper stops
+  asking; the normal loop carries on.
+* Only the **last few messages** are sent, never the whole chat, and long texts are cut.
+* API keys only ever go into the request headers. They are never sent in a message, never
+  logged, and are shown as `[hidden key]` if a server echoes one back.
+* If a helper call fails or times out, the log says so in plain words and the normal loop
+  continues. A helper problem never crashes a run.
+* The log names the provider that answered every call, for example
+  *"Smart Helper (auto stop when done) answered with Grok in 2s (27 calls left)."*
+
+> **This is the one part of Chat Bridge that sends your chat text to Google or xAI.**
+> The popup says so next to the switch. With the switch off, nothing ever leaves this
+> computer beyond the requests you already chose to make.
+
+---
+
+## 8. Common problems
 
 | Problem | What to do |
 | --- | --- |
@@ -239,10 +294,15 @@ server ever echoes one back.
 | Nothing works on a `chrome://` page, the Chrome Web Store, or a PDF | Chrome blocks extensions there. Use a normal website tab. |
 | API mode says "the API key was rejected" | Check the key was copied fully and that it belongs to the provider you chose. |
 | API mode says "the free quota or rate limit is used up" | Wait a minute, or make the other provider the main one. The backup is used automatically. |
+| Smart Helper does nothing and the log says "No API key is saved" | The helper needs a Gemini or Grok key. Add one in Settings, or switch the helper off. |
+| Smart Helper says "used all its calls for this run" | Raise **Max helper calls per run**, or let the run continue: the normal loop still works. |
+| "Auto detect brain and worker" says it could not tell | The two chats look too similar. Set the roles by hand with **Make this Tab A / B**. Nothing was changed. |
+| Auto stop never stops | Type a **Project goal**, and remember it only checks every N rounds. A muddled answer keeps the loop going on purpose. |
+| The best answer is not the one that was forwarded | The helper follows the goal. Make the goal more specific, or switch **Pick the best answer** off. |
 
 ---
 
-## 8. Test plan
+## 9. Test plan
 
 Run these in order. Each one checks a different part of the machinery.
 
@@ -279,9 +339,24 @@ which is expected. Start the run and check that each tab still finds its own rep
   Expected: the log says Gemini failed, then "The answer came from Grok instead."
 * Both keys wrong: the run stops with "Both API providers failed."
 
+**Test 6 — Smart Helper**
+
+1. Leave the switch off and run one round: the log must not mention the Smart Helper at all,
+   and nothing extra is sent anywhere.
+2. Switch it on, tick **Auto stop**, type the goal *"a working to-do app in one HTML file"*,
+   set rounds to `10`. Expected: the log shows a check after each round with the provider's
+   name, and the run stops with *"Stopped by the Smart Helper: …"* once the work is done.
+3. Put a wrong key in Settings and tick only **Auto stop**. Expected: the log says the helper
+   could not answer, and the normal loop still finishes its rounds.
+4. Tick **Auto detect brain and worker** and press the button. Expected: a plain sentence
+   naming the brain, and the roles swapped (check the Make Tab A/B buttons). Then train it on
+   two nearly identical chats: it should say it cannot tell, and change nothing.
+5. On an Arena battle page, tick **Pick the best answer**, run one round, and check the log:
+   *"chose card N of M: …"*, and that the forwarded message is that card, not the last one.
+
 ---
 
-## 9. Folder structure (ZIP ready)
+## 10. Folder structure (ZIP ready)
 
 ```
 Chat-Bridge/
@@ -291,6 +366,7 @@ Chat-Bridge/
 ├── selectors.js         <- builds the saved CSS selectors
 ├── extract.js           <- the three copy modes
 ├── api-client.js        <- Gemini and Grok, with fallback
+├── helper.js            <- the Smart Helper: roles, best answer, auto stop
 ├── common.js            <- shared helpers and default settings
 ├── popup.html           <- the popup window
 ├── popup.js             <- popup logic
@@ -311,7 +387,7 @@ The repository also contains `dev/` (the automated tests) and `package.json`. Th
 
 ---
 
-## 10. For developers: the tests
+## 11. For developers: the tests
 
 The extension itself has zero dependencies. The test suite uses Node's built-in test
 runner plus `jsdom` (a headless DOM), and exercises the **real** extension files:
@@ -321,7 +397,7 @@ npm install     # installs jsdom, only for the tests
 npm test
 ```
 
-What is covered (125 tests):
+What is covered (177 tests):
 
 * `selectors.test.js` — hash classes are rejected, replies match every answer, ids with
   digits are ignored, the structural fallback works, and the builder is checked against
@@ -330,9 +406,13 @@ What is covered (125 tests):
 * `common.test.js` — site keys (`/c` vs `/agent`), defaults, clamping, key hiding.
 * `api-client.test.js` — request shapes for both providers, retry once, fallback, 429
   cooldown that is **remembered across rounds**, empty answers, both-fail message.
+* `helper.test.js` — the Smart Helper on its own with a fake API: the master switch, the
+  call budget, all three prompts and their strict parsers, DONE/CONTINUE, the single-card
+  shortcut, keys never appearing in a message, and a failed call never throwing.
 * `content.test.js` — the real `content.js` in a page: React-safe textarea fill,
-  contenteditable insert, Enter fallback, disabled send button, multi-line text, and a
-  brand-new chat with **no AI reply yet** reading as an empty reply instead of an error.
+  contenteditable insert, Enter fallback, disabled send button, multi-line text, a
+  brand-new chat with **no AI reply yet** reading as an empty reply instead of an error,
+  and the newest group of **answer cards** (Arena battle mode) with their own code blocks.
 * `picker.test.js` — the real picker: hover, Arrow Up/Down, click to save, Esc to cancel,
   and that the page never receives the clicks.
 * `popup.test.js` — the real `popup.html` in jsdom: every control, saving settings, ticks,
@@ -343,6 +423,11 @@ What is covered (125 tests):
   starts with the user's turn, a **brand-new Tab B with no reply yet**, our **own pasted
   message** showing up as the newest reply (it is not counted as an answer), and a
   **closed Tab B** reported before anything is sent.
+* Smart Helper loop tests (inside `loop.test.js`): **auto stop** on DONE and its reason in
+  the status line, CONTINUE keeping the loop going, a helper failure being logged while the
+  run carries on, checking only every N rounds, **role detection** swapping the tabs and
+  changing nothing on an unclear answer, **best card** forwarded instead of the last one,
+  the single-card shortcut, and the helper switched off with no keys still running normally.
 
 There is also `dev/smoke.js`, which checks that the manifest is complete, every file it
 names exists, all JavaScript parses, the service worker can load its helpers, no API key

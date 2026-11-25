@@ -12,6 +12,7 @@ Install: `chrome://extensions` → Developer mode → **Load unpacked** → choo
 - [`selectors.js`](#selectorsjs)
 - [`extract.js`](#extractjs)
 - [`api-client.js`](#api-clientjs)
+- [`helper.js`](#helperjs)
 - [`common.js`](#commonjs)
 - [`popup.html`](#popuphtml)
 - [`popup.js`](#popupjs)
@@ -74,7 +75,7 @@ Install: `chrome://extensions` → Developer mode → **Load unpacked** → choo
 
 <a id="backgroundjs"></a>
 
-*624 lines.*
+*904 lines.*
 
 ````js
 // background.js — the service worker that runs the loop,
@@ -83,11 +84,12 @@ Install: `chrome://extensions` → Developer mode → **Load unpacked** → choo
 // looks idle; the 1-second polling and a small heartbeat keep it alive.
 // Plain JavaScript. No frameworks.
 
-importScripts('common.js', 'extract.js', 'api-client.js');
+importScripts('common.js', 'extract.js', 'api-client.js', 'helper.js');
 
 const Common = self.ChatBridgeCommon;
 const Extract = self.ChatBridgeExtract;
 const ChatApi = self.ChatBridgeApi;
+const Helper = self.ChatBridgeHelper;
 
 // How often the reply is read. The brief asks for 1 second; the tests shrink
 // it with the __chatBridgePollMs hook so they finish quickly.
@@ -131,7 +133,12 @@ async function setStatus(text, tone, extra) {
 }
 
 async function addLog(text) {
-  const line = { t: Date.now(), text: String(text) };
+  // Belt and braces: an API error message could echo a key back, so every
+  // line is cleaned before it is written or shown.
+  const settings = typeof activeRun === 'object' && activeRun
+    ? activeRun.settings
+    : await getSettings();
+  const line = { t: Date.now(), text: Common.hideSecret(String(text), settings) };
   await queueWrite(async () => {
     const stored = await chrome.storage.local.get('log');
     const list = Array.isArray(stored.log) ? stored.log : [];
@@ -362,6 +369,7 @@ async function forward(run, fromRole, toRole, text) {
   const baseline = await readTab(toTab);
   const message = Common.wrapMessage(settings.prefix, text, settings.suffix);
   if (!message) throw new Error('There is nothing to send: the last reply was empty.');
+  run.lastSent = message.length > 600 ? message.slice(0, 600) + '…' : message;
   if (message.length > START_TEXT_MAX) {
     throw new Error('The reply is very long (' + message.length + ' characters). ' +
       'Many chat boxes refuse a message that big. Use "Between markers" or "Last code block" ' +
@@ -372,7 +380,9 @@ async function forward(run, fromRole, toRole, text) {
 
   // The waiter gets the sent text, so a page that shows our message back as
   // the newest "reply" is not mistaken for the AI answering.
-  const reply = await waitForNewReply(run, toRole, baseline, message);
+  let reply = await waitForNewReply(run, toRole, baseline, message);
+  // Part 2: a tab with several answer cards hands over the best one.
+  reply = await chooseBestReply(run, toRole, reply);
   const mode = toRole === 'A' ? settings.copyModeA : settings.copyModeB;
   const picked = applyMode(reply, mode, { start: settings.markerStart, end: settings.markerEnd });
   if (picked.error) {
@@ -395,6 +405,137 @@ function checkStopOptions(run, role, text, previousText) {
   return '';
 }
 
+// ---------- the Smart Helper ----------
+
+// Keep the last few messages in the run, for the helper questions. Only the
+// newest handful is ever sent, never the whole chat.
+const HISTORY_MAX = 8;
+function remember(run, role, text) {
+  const clean = String(text == null ? '' : text).trim();
+  if (!clean) return;
+  if (!run.history) run.history = [];
+  run.history.push({ who: 'Tab ' + role + ' (' + roleTitle(run, role) + ')', text: clean });
+  while (run.history.length > HISTORY_MAX) run.history.shift();
+}
+
+// Make one Smart Helper call for this run. Never throws: a failure or a
+// timeout comes back as { ok:false } and the normal loop carries on.
+async function helperAsk(run, job, question, systemPrompt) {
+  if (!Helper || !run.helperBudget) {
+    return { ok: false, skipped: true, error: 'The Smart Helper is not loaded.' };
+  }
+  const result = await Helper.ask(question, systemPrompt, {
+    api: ChatApi,
+    settings: run.settings,
+    budget: run.helperBudget,
+    cooldowns: run.cooldowns,
+    fetch: run.helperFetch
+  });
+  if (result.ok) {
+    await addLog('Smart Helper (' + Helper.jobName(job) + ') answered with ' + Helper.providerName(result.provider) +
+      ' in ' + Math.round((result.milliseconds || 0) / 1000) + 's (' + run.helperBudget.left() + ' calls left).');
+    for (const note of result.notes || []) await addLog(note);
+  } else {
+    await addLog(Helper.helperLogLine(job, result));
+  }
+  return result;
+}
+
+// Part 2: when a tab shows several answer cards for the newest turn, read all
+// of them and keep the one the API says is best for the project goal. With a
+// single card the API is never called. Any problem leaves the reply as it is.
+async function chooseBestReply(run, role, reply) {
+  const settings = run.settings;
+  if (!Helper || !Helper.on(settings, 'best')) return reply;
+  const tabId = run.roles[role];
+  let group;
+  try {
+    group = await sendToTab(tabId, { type: 'readReplyGroup' });
+  } catch (err) {
+    await addLog('Smart Helper (pick the best answer) could not read the answer cards: ' +
+      plainError(err, 'the page did not answer') + ' The newest answer is used.');
+    return reply;
+  }
+  if (!group || group.error || !Array.isArray(group.cards) || group.cards.length <= 1) {
+    // One card (or none) means there is nothing to choose, so no API call.
+    return reply;
+  }
+
+  const mode = role === 'A' ? settings.copyModeA : settings.copyModeB;
+  const markers = { start: settings.markerStart, end: settings.markerEnd };
+  // Ask about the text the copy mode would forward, so the choice matches
+  // what would really be sent.
+  const cards = group.cards.map(function (card) {
+    const picked = applyMode(card, mode, markers);
+    return { text: picked.error ? card.text : picked.text, code: card.code };
+  });
+  const info = await tabInfo(tabId, role);
+  const result = await Helper.chooseBestCard({
+    cards: cards,
+    goal: settings.goal,
+    title: info.ok ? info.label : roleTitle(run, role),
+    question: run.lastSent || ''
+  }, {
+    api: ChatApi,
+    settings: settings,
+    budget: run.helperBudget,
+    cooldowns: run.cooldowns,
+    fetch: run.helperFetch,
+    ask: (question, systemPrompt) => helperAsk(run, 'best', question, systemPrompt)
+  });
+
+  if (!result.ok) {
+    await addLog(Helper.helperLogLine('best', result) + ' The newest answer is used.');
+    return reply;
+  }
+  if (result.skippedApi) {
+    await addLog(Helper.bestCardLine(result, cards.length));
+    return reply;
+  }
+  await addLog(Helper.bestCardLine(result, cards.length));
+  const chosen = group.cards[result.index];
+  if (!chosen) return reply;
+  // Return the chosen card in the same shape as a normal reading.
+  return Object.assign({}, reply, { count: group.cards.length, text: chosen.text, code: chosen.code || '' });
+}
+
+// Part 3: after a round, ask whether the project is finished. Returns the
+// stop sentence when it is, otherwise '' (and logs the reason either way).
+async function autoStopCheck(run, round) {
+  const settings = run.settings;
+  if (!Helper || !Helper.stopCheckDue(settings, round)) return '';
+  checkStop();
+  const result = await Helper.shouldStop({
+    goal: settings.goal,
+    round: round,
+    messages: run.history || []
+  }, {
+    api: ChatApi,
+    settings: settings,
+    budget: run.helperBudget,
+    cooldowns: run.cooldowns,
+    fetch: run.helperFetch,
+    // Log every call through helperAsk, so the provider is always named.
+    ask: (question, systemPrompt) => helperAsk(run, 'stop', question, systemPrompt)
+  });
+  if (!result.checked) {
+    // Every skipped or failed check says so once, in plain words, so the log
+    // never hides why the Smart Helper did nothing.
+    if (result.provider) {
+      await addLog('Smart Helper (' + Helper.providerName(result.provider) + '): ' + result.why);
+    } else if (result.skipped) {
+      await addLog('Smart Helper (auto stop when done) was skipped: ' + result.why);
+    } else {
+      await addLog('Smart Helper (auto stop when done) could not answer: ' + result.why +
+        ' The normal loop carries on.');
+    }
+    return '';
+  }
+  if (result.done) return result.stopText || 'Stopped by the Smart Helper: the project is finished.';
+  if (result.log) await addLog(result.log);
+  return '';
+}
+
 // ---------- tab to tab mode ----------
 async function runTabMode(run) {
   const settings = run.settings;
@@ -404,12 +545,14 @@ async function runTabMode(run) {
   await setStatus('Reading the first message from Tab A', 'running');
   let outgoing = await readPickedText(run, 'A');
   const previous = { A: outgoing, B: '' };
+  remember(run, 'A', outgoing);
 
   for (let round = 1; round <= rounds; round++) {
     run.statusPrefix = 'Round ' + round + '/' + rounds + ': ';
     for (const [from, to] of [['A', 'B'], ['B', 'A']]) {
       checkStop();
       const newText = await forward(run, from, to, outgoing);
+      remember(run, to, newText);
       const stopReason = checkStopOptions(run, to, newText, previous[to]);
       previous[to] = newText;
       outgoing = newText;
@@ -418,7 +561,17 @@ async function runTabMode(run) {
         await setStatus(stopReason, 'done');
         return { finished: false, reason: stopReason };
       }
-      if (to === 'A') await addLog('Round ' + round + ' of ' + rounds + ' finished.');
+      if (to === 'A') {
+        await addLog('Round ' + round + ' of ' + rounds + ' finished.');
+        // Part 3: the round is complete, so this is the moment to ask whether
+        // the project is finished.
+        const helperStop = await autoStopCheck(run, round);
+        if (helperStop) {
+          await addLog(helperStop);
+          await setStatus(helperStop, 'done');
+          return { finished: false, reason: helperStop, helperStopped: true };
+        }
+      }
     }
   }
   const done = 'Finished all ' + rounds + ' round' + (rounds === 1 ? '' : 's') + '.';
@@ -447,11 +600,13 @@ async function runApiMode(run) {
 
   await setStatus('Reading the first message from Tab A', 'running');
   let outgoing = await readPickedText(run, 'A');
+  remember(run, 'A', outgoing);
   let previous = outgoing;
   const memory = []; // { role: 'user' | 'assistant', content }
   // One cooldown table for the whole run, so a provider that answered 429 in
-  // an earlier round is still skipped in the later rounds.
-  const cooldowns = { gemini: 0, grok: 0 };
+  // an earlier round is still skipped in the later rounds. The Smart Helper
+  // shares it, so both talk about the same resting providers.
+  const cooldowns = run.cooldowns;
 
   for (let round = 1; round <= rounds; round++) {
     checkStop();
@@ -481,13 +636,15 @@ async function runApiMode(run) {
     const baseline = await readTab(run.roles.A);
     const pastedIntoA = Common.wrapMessage(settings.prefix, answer.text, settings.suffix);
     await deliverToTab(run.roles.A, pastedIntoA);
-    const reply = await waitForNewReply(run, 'A', baseline, pastedIntoA);
+    let reply = await waitForNewReply(run, 'A', baseline, pastedIntoA);
+    reply = await chooseBestReply(run, 'A', reply);
     const picked = applyMode(reply, settings.copyModeA, {
       start: settings.markerStart, end: settings.markerEnd
     });
     if (picked.error) {
       throw new Error('I read a new answer from Tab A but ' + picked.error);
     }
+    remember(run, 'A', picked.text);
     const stopReason = checkStopOptions(run, 'A', picked.text, previous);
     previous = picked.text;
     outgoing = picked.text;
@@ -497,11 +654,121 @@ async function runApiMode(run) {
       return { finished: false, reason: stopReason };
     }
     await addLog('Round ' + round + ' of ' + rounds + ' finished (' + providerName + ').');
+    const helperStop = await autoStopCheck(run, round);
+    if (helperStop) {
+      await addLog(helperStop);
+      await setStatus(helperStop, 'done');
+      return { finished: false, reason: helperStop, helperStopped: true };
+    }
   }
   const done = 'Finished all ' + rounds + ' round' + (rounds === 1 ? '' : 's') + '.';
   await setStatus(done, 'done');
   await addLog(done);
   return { finished: true, reason: done };
+}
+
+// ---------- part 1: auto detect brain and worker ----------
+// Read the last user message and the last AI reply of a tab. Missing pieces
+// come back as empty text, never as an error.
+async function readTabSample(tabId) {
+  try {
+    const reply = await readTab(tabId);
+    let lastUser = '';
+    try {
+      const user = await sendToTab(tabId, { type: 'readLastUser' });
+      if (user && !user.error && typeof user.text === 'string') lastUser = user.text;
+    } catch (err) { /* the user message is a bonus, not required */ }
+    return { ok: true, reply: reply.text || '', lastUser: lastUser };
+  } catch (err) {
+    return { ok: false, error: plainError(err, 'That tab could not be read.') };
+  }
+}
+
+// Ask the API which window is the brain. Never changes anything on failure.
+// Returns { ok, brain, worker, message, provider } with plain-English text.
+async function detectRoles() {
+  const settings = await getSettings();
+  const roles = await getRoles();
+  if (!roles.A || !roles.B) {
+    return {
+      error: 'Choose Tab A and Tab B first. Open each chat tab and press "Make this Tab A" ' +
+        'or "Make this Tab B".'
+    };
+  }
+  if (!Helper || !Helper.on(settings, 'roles')) {
+    return { error: 'Switch on the Smart Helper and tick "Auto detect brain and worker" first.' };
+  }
+  const infoA = await tabInfo(roles.A, 'A');
+  const infoB = await tabInfo(roles.B, 'B');
+  if (!infoA.ok) return { error: infoA.error };
+  if (!infoB.ok) return { error: infoB.error };
+
+  const sampleA = await readTabSample(roles.A);
+  const sampleB = await readTabSample(roles.B);
+  if (!sampleA.ok || !sampleB.ok) {
+    return { error: 'I could not read both tabs. ' + (sampleA.error || sampleB.error) };
+  }
+
+  const sides = {
+    A: 'Left window (' + infoA.label + ')',
+    B: 'Right window (' + infoB.label + ')'
+  };
+  const budget = Helper.createBudget(Helper.maxCalls(settings));
+  const result = await Helper.detectRoles({
+    leftLabel: infoA.label,
+    rightLabel: infoB.label,
+    leftReply: sampleA.reply,
+    leftUser: sampleA.lastUser,
+    rightReply: sampleB.reply,
+    rightUser: sampleB.lastUser
+  }, {
+    api: ChatApi,
+    settings: settings,
+    budget: budget,
+    cooldowns: { gemini: 0, grok: 0 },
+    ask: async (question, systemPrompt) => {
+      const answer = await Helper.ask(question, systemPrompt, {
+        api: ChatApi,
+        settings: settings,
+        budget: budget,
+        cooldowns: { gemini: 0, grok: 0 }
+      });
+      if (answer.ok) {
+        await addLog('Smart Helper (auto detect brain and worker) answered with ' +
+          Helper.providerName(answer.provider) + '.');
+      } else {
+        await addLog(Helper.helperLogLine('roles', answer));
+      }
+      return answer;
+    }
+  });
+
+  if (!result.ok) {
+    const why = result.skipped
+      ? result.error
+      : 'The Smart Helper could not tell which window is the brain: ' + result.error;
+    return { error: why + ' Nothing was changed.' };
+  }
+
+  // Brain becomes Tab A, worker becomes Tab B.
+  const brainTab = result.brain === 'A' ? roles.A : roles.B;
+  const workerTab = result.brain === 'A' ? roles.B : roles.A;
+  const titles = (await chrome.storage.local.get('roleTitles')).roleTitles || {};
+  if (infoA.ok) titles[roles.A] = infoA.tab.title || infoA.label;
+  if (infoB.ok) titles[roles.B] = infoB.tab.title || infoB.label;
+  await chrome.storage.local.set({
+    roles: { A: brainTab, B: workerTab },
+    roleTitles: titles,
+    helperDetect: {
+      t: Date.now(),
+      brain: result.brain,
+      message: Helper.roleSentence(result, sides),
+      provider: result.provider
+    }
+  });
+  const sentence = Helper.roleSentence(result, sides);
+  await addLog('Smart Helper set the roles: ' + sentence);
+  return { ok: true, brain: result.brain, message: sentence, provider: result.provider };
 }
 
 // ---------- checking everything before a run ----------
@@ -582,7 +849,12 @@ async function startRun() {
     stopRequested: false,
     statusPrefix: '',
     titles: {},
-    heartbeat: null
+    heartbeat: null,
+    // The newest few messages, for the Smart Helper questions.
+    history: [],
+    // One cooldown table and one call budget for the whole run.
+    cooldowns: { gemini: 0, grok: 0 },
+    helperBudget: Helper ? Helper.createBudget(Helper.maxCalls(settings)) : null
   };
   for (const role of ['A', 'B']) {
     if (!roles[role]) continue;
@@ -593,6 +865,14 @@ async function startRun() {
   await setRunFlag(true, '');
   await setStatus('Starting...', 'running');
   await addLog('Run started in ' + (settings.mode === 'api' ? 'API' : 'tab to tab') + ' mode.');
+  if (Helper && Helper.anyPartOn(settings)) {
+    const parts = [];
+    if (Helper.on(settings, 'stop')) parts.push('auto stop when done');
+    if (Helper.on(settings, 'roles')) parts.push('auto detect brain and worker');
+    if (Helper.on(settings, 'best')) parts.push('pick the best answer');
+    await addLog('Smart Helper is on: ' + parts.join(', ') + '. Up to ' +
+      run.helperBudget.limit + ' API calls for this run.');
+  }
 
   // A small extension call every 10 seconds keeps the service worker awake,
   // even while a long API request is waiting for an answer.
@@ -651,6 +931,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         roles: await getRoles()
       };
     }
+    if (type === 'detectRoles') return detectRoles();
     if (type === 'check') {
       const settings = await getSettings();
       return await validateRun(settings);
@@ -708,7 +989,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 <a id="contentjs"></a>
 
-*702 lines.*
+*777 lines.*
 
 ````js
 // content.js — runs inside every web page (see manifest.json).
@@ -893,6 +1174,67 @@ chrome.runtime.onInstalled.addListener(() => {
       code = Extract.cleanText(Extract.visibleText(holder));
     }
     return { ok: true, count: list.length, text: text, code: code };
+  }
+
+  // ---------- answer cards of the newest turn ----------
+  // Some chats (Arena battle mode) show several answers for the same turn.
+  // The cards are siblings: they share the same parent as the last match.
+  // Returns the text of every card, oldest first, each with its own code block.
+  function readNewestGroup(selector) {
+    const list = replyMatches(selector);
+    if (!list.length) return { ok: true, count: 0, cards: [] };
+    selectorsThatMatched.add(selector);
+    const last = list[list.length - 1];
+    const parent = last.parentElement;
+    // Cards from the same parent, in page order. When the pick points at
+    // something without a useful parent, the last reply is the only card.
+    let group = [last];
+    if (parent && parent.querySelectorAll) {
+      const sameParent = list.filter(function (element) {
+        return element.parentElement === parent;
+      });
+      if (sameParent.length > 1) group = sameParent;
+    }
+    // Only a group that ends with the last match is "the newest turn": an
+    // older group is never used.
+    const cards = group.map(function (element) {
+      const body = textBodyOf(element);
+      const text = Extract.cleanText(Extract.visibleText(body));
+      let code = '';
+      const blocks = (body || element).querySelectorAll('pre code, pre');
+      if (blocks.length) {
+        const block = blocks[blocks.length - 1];
+        const holder = block.tagName === 'PRE' && block.querySelector('code')
+          ? block.querySelector('code') : block;
+        code = Extract.cleanText(Extract.visibleText(holder));
+      }
+      return { text: text, code: code };
+    }).filter(function (card) { return card.text; });
+    return { ok: true, count: cards.length, cards: cards };
+  }
+
+  // The newest message the USER typed, for the Smart Helper's role question.
+  // Sites mark user turns in different ways, so try the usual attributes and
+  // fall back to a bubble that holds the chat box's own text. Never fails.
+  const USER_TURN_SELECTOR = [
+    '[data-message-author-role="user"]',
+    '[data-role="user"]',
+    '.user-message', '.user-turn',
+    '[class*="user-message"]', '[class*="human"]'
+  ].join(', ');
+
+  function readLastUserMessage() {
+    let candidates = [];
+    try {
+      candidates = Selectors.queryAll(document, USER_TURN_SELECTOR).filter(isVisible);
+    } catch (err) {
+      candidates = [];
+    }
+    if (!candidates.length) return { ok: true, text: '' };
+    const element = candidates[candidates.length - 1];
+    const body = textBodyOf(element) || element;
+    const text = Extract.cleanText(Extract.visibleText(body));
+    return { ok: true, text: text };
   }
 
   // ---------- pasting and sending ----------
@@ -1369,6 +1711,20 @@ chrome.runtime.onInstalled.addListener(() => {
         return { error: 'Chat box not found: please pick the chat box on this site first.' };
       }
       return deliverMessage(picks, message.text);
+    },
+
+    // Smart Helper (part 2): every answer card of the newest turn.
+    async readReplyGroup(message) {
+      const picks = message.picks || await readPicks(siteKey());
+      if (!picks || !picks.reply) {
+        return { ok: false, count: 0, cards: [], error: 'The AI reply is not picked for this site yet. Please pick the AI reply.' };
+      }
+      return readNewestGroup(picks.reply.selector);
+    },
+
+    // Smart Helper (part 1): the newest user message of this page.
+    async readLastUser() {
+      return readLastUserMessage();
     },
 
     // Background worker (once per second): the newest reply and match count.
@@ -2262,11 +2618,560 @@ chrome.runtime.onInstalled.addListener(() => {
 
 ---
 
+## helper.js
+
+<a id="helperjs"></a>
+
+*539 lines.*
+
+````js
+// helper.js — the "Smart Helper": three optional jobs that use the same
+// Gemini / Grok API client (api-client.js) as API mode, with the same
+// automatic fallback between the two providers.
+//
+//   1. Auto detect the brain and the worker
+//   2. Pick the best answer when a tab shows several answer cards
+//   3. Auto stop when the project goal is finished
+//
+// Rules this file keeps, every time:
+//   * Nothing here runs unless the master switch is on and the part's own
+//     checkbox is on.
+//   * Only the last few messages are sent, never the whole chat.
+//   * Every call is counted against "Max helper calls per run".
+//   * A failed or timed-out call never throws into the loop: it returns
+//     ok:false with a plain-English line for the log.
+//   * API keys only ever go into the request headers, never into the text
+//     that is sent, the log, or a status line.
+//
+// Plain JavaScript, no dependencies. Loadable in Node for the tests.
+(function (root, factory) {
+  'use strict';
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.ChatBridgeHelper = api;
+})(typeof self !== 'undefined' ? self : null, function () {
+  'use strict';
+
+  const PARTS = ['roles', 'best', 'stop'];
+  const DEFAULT_MAX_CALLS = 30;
+
+  // How much of a chat is sent with each question. Short on purpose: the
+  // helper needs the gist, not the whole conversation.
+  const TEXT_LIMIT = 1200;      // characters per message
+  const CARD_LIMIT = 3000;      // characters per answer card
+  const MESSAGES_LIMIT = 6;     // how many recent messages are sent
+
+  // A plain, short instruction for each job. The last line of every one of
+  // them says what shape the answer must have, because parsing needs it.
+  const PROMPTS = {
+    roles: 'You are helping a tool that connects two AI chat windows. ' +
+      'One window gives instructions and plans; the other does the work. ' +
+      'The window that gives instructions and plans is called the brain. ' +
+      'The window that carries out the work is called the worker.',
+    best: 'You are helping a tool that connects two AI chat windows. ' +
+      'One chat window showed several answer cards for the same question. ' +
+      'Choose the one that is most useful for the project goal: the most complete, ' +
+      'correct and directly usable answer.',
+    stop: 'You are helping a tool that connects two AI chat windows. ' +
+      'You are given the project goal and the latest messages between the two chats. ' +
+      'Decide whether the project is finished.'
+  };
+
+  // ---------- small helpers ----------
+  function on(settings, part) {
+    // The master switch has the last word: with it off, no part runs.
+    if (!settings || !settings.helperOn) return false;
+    if (part === 'roles') return Boolean(settings.helperRoles);
+    if (part === 'best') return Boolean(settings.helperBest);
+    if (part === 'stop') return Boolean(settings.helperStop);
+    return false;
+  }
+
+  function anyPartOn(settings) {
+    return PARTS.some(function (part) { return on(settings, part); });
+  }
+
+  function maxCalls(settings) {
+    const raw = settings ? settings.helperMaxCalls : undefined;
+    // An empty box means "not filled in", not "zero calls".
+    if (raw === '' || raw === null || raw === undefined) return DEFAULT_MAX_CALLS;
+    const n = Math.round(Number(raw));
+    if (!Number.isFinite(n)) return DEFAULT_MAX_CALLS;
+    return Math.min(500, Math.max(0, n));
+  }
+
+  // A short, single-line version of a text, for the log.
+  function oneLine(text, max) {
+    const limit = max || 120;
+    const value = String(text == null ? '' : text)
+      .replace(/\s+/g, ' ')
+      .trim();
+    return value.length > limit ? value.slice(0, limit - 1) + '…' : value;
+  }
+
+  // Cut a long text to a readable size, and say that it was cut, so the AI
+  // does not think the answer simply stopped.
+  function clip(text, limit) {
+    const value = String(text == null ? '' : text).trim();
+    const max = limit || TEXT_LIMIT;
+    if (value.length <= max) return value;
+    return value.slice(0, max) + '\n…(the rest was cut to keep the message short)';
+  }
+
+  // The newest N messages, oldest first, each cut to a readable size.
+  function recentMessages(list, limit) {
+    const items = Array.isArray(list) ? list.filter(Boolean) : [];
+    const max = Math.max(1, limit || MESSAGES_LIMIT);
+    return items.slice(-max).map(function (item) {
+      return { who: String(item.who || 'a chat'), text: clip(item.text) };
+    });
+  }
+
+  // Turn a list of messages into the plain block that is sent to the API.
+  function transcript(messages) {
+    return messages.map(function (m) {
+      return m.who + ' wrote:\n' + m.text;
+    }).join('\n\n---\n\n');
+  }
+
+  // ---------- talking to the API ----------
+  // One helper call, never more than the run allows.
+  //   deps: { api, settings, budget, fetch, now, sleep, cooldowns }
+  // Returns:
+  //   { ok:true, text, provider, milliseconds, notes }
+  //   { ok:false, error, skipped:true }   nothing was sent
+  //   { ok:false, error }                 the API failed
+  async function ask(question, systemPrompt, deps) {
+    const d = deps || {};
+    const settings = d.settings || {};
+    const provider = String(settings.provider || 'gemini');
+    if (provider !== 'gemini' && provider !== 'grok') {
+      return { ok: false, error: 'Unknown provider.' };
+    }
+    if (!d.api || typeof d.api.requestWithFallback !== 'function') {
+      return { ok: false, error: 'The API helper is not loaded.' };
+    }
+    // No key at all, for either provider: skip quietly. Tab to tab mode with
+    // the helper parts on and no keys must still work.
+    const hasAnyKey = Boolean(String(settings.geminiKey || '').trim()) ||
+      Boolean(String(settings.grokKey || '').trim());
+    if (!hasAnyKey) {
+      return { ok: false, skipped: true, error: 'No API key is saved, so the Smart Helper is skipped.' };
+    }
+    if (d.budget && typeof d.budget.take === 'function') {
+      const allowed = d.budget.take();
+      if (!allowed) {
+        return { ok: false, skipped: true, error: 'The Smart Helper used all its calls for this run.' };
+      }
+    }
+
+    const started = Date.now();
+    try {
+      const answer = await d.api.requestWithFallback(
+        [{ role: 'user', content: question }],
+        {
+          provider: provider,
+          geminiKey: settings.geminiKey,
+          geminiModel: settings.geminiModel,
+          grokKey: settings.grokKey,
+          grokModel: settings.grokModel,
+          systemPrompt: systemPrompt || ''
+        },
+        { fetch: d.fetch, now: d.now, sleep: d.sleep, cooldowns: d.cooldowns }
+      );
+      const text = String((answer && answer.text) || '').trim();
+      if (!text) {
+        return { ok: false, error: 'The API sent an empty answer.', provider: answer && answer.provider };
+      }
+      return {
+        ok: true,
+        text: text,
+        provider: answer.provider,
+        milliseconds: Date.now() - started,
+        notes: answer.notes || []
+      };
+    } catch (err) {
+      return { ok: false, error: err && err.message ? err.message : String(err) };
+    }
+  }
+
+  // Pull the first JSON object out of an answer. Models like to add a
+  // sentence or wrap it in ```json fences, so be forgiving about that.
+  function parseJsonObject(text) {
+    const source = String(text == null ? '' : text).trim();
+    if (!source) return null;
+    const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const body = fenced ? fenced[1] : source;
+    const start = body.indexOf('{');
+    const end = body.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    try {
+      const value = JSON.parse(body.slice(start, end + 1));
+      return value && typeof value === 'object' ? value : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // ---------- part 1: brain and worker ----------
+  // Build the question for "which window is the brain?".
+  function buildRolePrompt(input) {
+    const sides = [
+      { role: 'A', label: String(input.leftLabel || 'Left window'), last: input.leftReply, lastUser: input.leftUser },
+      { role: 'B', label: String(input.rightLabel || 'Right window'), last: input.rightReply, lastUser: input.rightUser }
+    ];
+    const lines = [
+      'Two chat windows are connected, A and B.',
+      'A = "' + sides[0].label + '", B = "' + sides[1].label + '".'
+    ];
+    for (const side of sides) {
+      lines.push('');
+      lines.push(side.role + ' (' + side.label + '):');
+      lines.push('  The user last said: ' + (clip(side.lastUser || '(nothing yet)', 400) || '(nothing yet)'));
+      lines.push('  The AI last answered: ' + (clip(side.last || '(nothing yet)', TEXT_LIMIT) || '(nothing yet)'));
+    }
+    lines.push('');
+    lines.push('Which window is the brain (it gives the instructions and plans) and ' +
+      'which is the worker (it does the work)?');
+    lines.push('Answer with JSON only, in exactly this shape:');
+    lines.push('{"brain":"A" or "B","confidence":"high","reason":"one short sentence"}');
+    return lines.join('\n');
+  }
+
+  // Read the model's answer to the role question. Never guesses.
+  function parseRoleAnswer(text) {
+    const value = parseJsonObject(text);
+    if (!value) {
+      return { ok: false, error: 'The API answer was not in the shape that was asked for.' };
+    }
+    const raw = String(value.brain == null ? '' : value.brain).trim().toUpperCase();
+    const brain = raw === 'A' || raw === 'LEFT' ? 'A' : (raw === 'B' || raw === 'RIGHT' ? 'B' : '');
+    if (!brain) {
+      return {
+        ok: false,
+        error: 'The API could not tell which window is the brain.',
+        reason: oneLine(value.reason, 200)
+      };
+    }
+    const confidence = String(value.confidence == null ? '' : value.confidence).trim().toLowerCase();
+    return {
+      ok: true,
+      brain: brain,
+      worker: brain === 'A' ? 'B' : 'A',
+      confidence: confidence || 'unknown',
+      reason: oneLine(value.reason, 200)
+    };
+  }
+
+  // Which window looks like the brain? Returns
+  //   { ok:true, brain:'A'|'B', worker, confidence, reason, provider }
+  //   { ok:false, error, skipped? }   nothing is changed on failure
+  // It never throws.
+  async function detectRoles(input, deps) {
+    const settings = (deps && deps.settings) || {};
+    if (!on(settings, 'roles')) return { ok: false, skipped: true, error: 'Auto detect is off.' };
+    const askFn = deps && typeof deps.ask === 'function' ? deps.ask : ask;
+    const result = await askFn(buildRolePrompt(input || {}), PROMPTS.roles, deps);
+    if (!result.ok) return { ok: false, error: result.error, skipped: Boolean(result.skipped) };
+    const parsed = parseRoleAnswer(result.text);
+    if (!parsed.ok) {
+      return { ok: false, error: parsed.error, note: parsed.reason, provider: result.provider };
+    }
+    return Object.assign({}, parsed, { provider: result.provider });
+  }
+
+  // A short sentence for the popup, for example
+  // "Right window looks like the brain (arena.ai/agent)."
+  function roleSentence(result, sides) {
+    if (!result || !result.ok) return '';
+    const labels = sides || {};
+    const brainLabel = labels[result.brain] || ('Tab ' + result.brain);
+    const workerLabel = labels[result.worker] || ('Tab ' + result.worker);
+    return brainLabel + ' looks like the brain, so ' + workerLabel + ' becomes the worker ' +
+      '(Tab B). ' + (result.reason ? result.reason : '');
+  }
+
+  // ---------- part 2: the best answer card ----------
+  // Build the question for "which answer card is the best one?".
+  function buildBestPrompt(input) {
+    const cards = Array.isArray(input.cards) ? input.cards : [];
+    const lines = [
+      'The chat window "' + String(input.title || 'a chat') + '" showed ' + cards.length +
+        ' answer cards for the same turn.',
+      'Project goal: ' + (clip(input.goal, 600) || '(no goal was typed)')
+    ];
+    if (input.question) {
+      lines.push('What was asked: ' + clip(input.question, 600));
+    }
+    lines.push('');
+    cards.forEach(function (card, index) {
+      lines.push('Card ' + (index + 1) + ':');
+      lines.push(clip(card.text, CARD_LIMIT));
+      lines.push('');
+    });
+    lines.push('Which card is the best one for the project goal? Answer with JSON only, in exactly this shape:');
+    lines.push('{"best":' + (cards.length > 1 ? '2' : '1') + ',"reason":"one short sentence"}');
+    lines.push('"best" is the card number: 1 to ' + Math.max(1, cards.length) + '.');
+    return lines.join('\n');
+  }
+
+  // Read the model's choice of card. Returns a 0-based index.
+  function parseBestAnswer(text, cardCount) {
+    const value = parseJsonObject(text);
+    const count = Math.max(0, Number(cardCount) || 0);
+    if (!value) {
+      return { ok: false, error: 'The API answer was not in the shape that was asked for.' };
+    }
+    const number = Math.round(Number(value.best));
+    if (!Number.isFinite(number) || number < 1 || number > count) {
+      return {
+        ok: false,
+        error: 'The API chose a card that does not exist.',
+        reason: oneLine(value.reason, 200)
+      };
+    }
+    return {
+      ok: true,
+      index: number - 1,
+      reason: oneLine(value.reason, 200) || 'no reason given'
+    };
+  }
+
+  // Choose the best card of a group. Returns
+  //   { ok:true, index, reason, provider }            the card to forward
+  //   { ok:false, error, skipped? }                   nothing is chosen
+  // With a single card the API is never called: there is nothing to choose.
+  async function chooseBestCard(input, deps) {
+    const settings = (deps && deps.settings) || {};
+    const cards = (input && Array.isArray(input.cards) ? input.cards : [])
+      .filter(function (card) { return card && String(card.text || '').trim(); });
+    if (cards.length <= 1) {
+      return {
+        ok: true,
+        index: 0,
+        reason: 'there is only one answer',
+        provider: null,
+        skippedApi: true
+      };
+    }
+    if (!on(settings, 'best')) return { ok: false, skipped: true, error: 'Pick the best answer is off.' };
+    const askFn = deps && typeof deps.ask === 'function' ? deps.ask : ask;
+    const result = await askFn(buildBestPrompt({
+      goal: input.goal,
+      title: input.title,
+      question: input.question,
+      cards: cards
+    }), PROMPTS.best, deps);
+    if (!result.ok) return { ok: false, error: result.error, skipped: Boolean(result.skipped) };
+    const parsed = parseBestAnswer(result.text, cards.length);
+    if (!parsed.ok) {
+      return { ok: false, error: parsed.error, note: parsed.reason, provider: result.provider };
+    }
+    return {
+      ok: true,
+      index: parsed.index,
+      reason: parsed.reason,
+      provider: result.provider,
+      cards: cards
+    };
+  }
+
+  // One short log line: "Smart Helper (Gemini) chose card 2 of 3: card 2 has more detail."
+  function bestCardLine(result, cardCount) {
+    const count = Math.max(1, Number(cardCount) || 1);
+    if (!result || !result.ok) return '';
+    if (result.skippedApi) return 'Smart Helper: only one answer, so no choice was needed.';
+    return 'Smart Helper (' + providerName(result.provider) + ') chose card ' +
+      (result.index + 1) + ' of ' + count + ': ' + result.reason;
+  }
+
+  // ---------- part 3: is the project finished? ----------
+  // Build the question for "is the project done?".
+  function buildStopPrompt(input) {
+    const goal = clip(input.goal, 1000);
+    const messages = recentMessages(input.messages, MESSAGES_LIMIT);
+    const lines = [
+      'Project goal: ' + (goal || '(no goal was typed)'),
+      '',
+      'The last messages between the two chats, oldest first:',
+      messages.length ? transcript(messages) : '(there are no messages yet)',
+      '',
+      'Is the project finished? Answer with DONE or CONTINUE and one short reason, ' +
+        'in exactly this shape: {"done":true,"reason":"one short sentence"}',
+      'Use "done":false when the work is clearly not finished yet.'
+    ];
+    return lines.join('\n');
+  }
+
+  // Read the model's DONE / CONTINUE answer. Only an explicit "done" stops
+  // the loop: a muddled answer keeps the run going, which is the safe side.
+  function parseStopAnswer(text) {
+    const source = String(text == null ? '' : text).trim();
+    if (!source) return { ok: false, error: 'The API sent an empty answer.' };
+    const value = parseJsonObject(source);
+    if (value && typeof value.done === 'boolean') {
+      return {
+        ok: true,
+        done: value.done,
+        reason: oneLine(value.reason, 200) || (value.done ? 'the project is finished' : 'not finished yet')
+      };
+    }
+    // A model that ignored the JSON instruction but said DONE plainly is fine.
+    const verdict = source.toUpperCase().match(/\b(DONE|CONTINUE)\b/);
+    if (verdict) {
+      const reason = oneLine(source.replace(/\b(DONE|CONTINUE)\b/i, '').replace(/^[\s:,.–-]+/, ''), 200);
+      return {
+        ok: true,
+        done: verdict[1] === 'DONE',
+        reason: reason || (verdict[1] === 'DONE' ? 'the project is finished' : 'not finished yet')
+      };
+    }
+    return { ok: false, error: 'The API did not say DONE or CONTINUE.' };
+  }
+
+  // After a round: ask whether the project is finished. Returns
+  //   { checked:true, done:true,  stopText:'...' }  stop the loop
+  //   { checked:true, done:false, log:'...' }        keep going
+  //   { checked:false, why:'...' }                   skipped (no goal, off, no calls left)
+  // It never throws.
+  async function shouldStop(input, deps) {
+    const settings = (deps && deps.settings) || {};
+    // The caller can pass its own ask() so every call is logged the same way.
+    const askFn = deps && typeof deps.ask === 'function' ? deps.ask : ask;
+    if (!on(settings, 'stop')) return { checked: false, why: 'Auto stop is off.' };
+    const goal = String(input && input.goal || '').trim();
+    if (!goal) return { checked: false, why: 'The project goal is empty.' };
+    const round = Number(input && input.round) || 0;
+    const every = Math.max(1, Math.round(Number(settings.helperStopEvery) || 1));
+    if (round % every !== 0) {
+      return { checked: false, why: 'Checked every ' + every + ' rounds.' };
+    }
+
+    const result = await askFn(
+      buildStopPrompt({ goal: goal, messages: input.messages }),
+      PROMPTS.stop,
+      deps
+    );
+    if (!result.ok) {
+      return { checked: false, why: result.error, skipped: Boolean(result.skipped) };
+    }
+    const parsed = parseStopAnswer(result.text);
+    const provider = providerName(result.provider);
+    if (!parsed.ok) {
+      return {
+        checked: false,
+        why: 'The Smart Helper could not tell whether the project is finished: ' + parsed.error,
+        provider: provider
+      };
+    }
+    if (parsed.done) {
+      return {
+        checked: true,
+        done: true,
+        provider: provider,
+        reason: parsed.reason,
+        stopText: 'Stopped by the Smart Helper: ' + parsed.reason + ' (' + provider + ')'
+      };
+    }
+    return {
+      checked: true,
+      done: false,
+      provider: provider,
+      reason: parsed.reason,
+      log: 'Smart Helper (' + provider + '): not finished yet — ' + parsed.reason
+    };
+  }
+
+  // After a round: should this round be checked at all? Used by the loop to
+  // skip the call without asking the API.
+  function stopCheckDue(settings, round) {
+    if (!on(settings, 'stop')) return false;
+    if (!String(settings.goal || '').trim()) return false;
+    const every = Math.max(1, Math.round(Number(settings.helperStopEvery) || 1));
+    return (Number(round) || 0) % every === 0;
+  }
+
+  function providerName(provider) {
+    return provider === 'grok' ? 'Grok' : (provider === 'gemini' ? 'Gemini' : 'the API');
+  }
+
+  // A plain sentence for the log when a helper call fails or is skipped.
+  function helperLogLine(job, result) {
+    const name = jobName(job);
+    if (!result) return name + ': nothing happened.';
+    if (result.skipped) return 'Smart Helper: ' + result.error + ' (' + name + ')';
+    return 'Smart Helper (' + name + ') could not answer: ' + result.error +
+      ' The normal loop carries on.';
+  }
+
+  function jobName(job) {
+    if (job === 'roles') return 'auto detect brain and worker';
+    if (job === 'best') return 'pick the best answer';
+    if (job === 'stop') return 'auto stop when done';
+    return 'Smart Helper';
+  }
+
+  // ---------- the call budget ----------
+  // One counter per run. take() answers "may I make one more call?" and
+  // remembers the answer, so the limit can never be exceeded.
+  function createBudget(limit) {
+    const max = limit === undefined ? DEFAULT_MAX_CALLS : Math.max(0, Math.round(Number(limit)) || 0);
+    return {
+      limit: max,
+      used: 0,
+      take: function take() {
+        if (this.used >= this.limit) return false;
+        this.used += 1;
+        return true;
+      },
+      left: function left() {
+        return Math.max(0, this.limit - this.used);
+      }
+    };
+  }
+
+  return {
+    DEFAULT_MAX_CALLS,
+    MESSAGES_LIMIT,
+    PARTS,
+    PROMPTS,
+    TEXT_LIMIT,
+    anyPartOn,
+    ask,
+    bestCardLine,
+    buildBestPrompt,
+    buildRolePrompt,
+    buildStopPrompt,
+    chooseBestCard,
+    clip,
+    createBudget,
+    detectRoles,
+    helperLogLine,
+    jobName,
+    maxCalls,
+    on,
+    oneLine,
+    parseBestAnswer,
+    parseJsonObject,
+    parseRoleAnswer,
+    parseStopAnswer,
+    providerName,
+    recentMessages,
+    roleSentence,
+    shouldStop,
+    stopCheckDue,
+    transcript
+  };
+});
+````
+
+---
+
 ## common.js
 
 <a id="commonjs"></a>
 
-*183 lines.*
+*201 lines.*
 
 ````js
 // common.js — small helpers shared by the popup, the background worker
@@ -2305,7 +3210,15 @@ chrome.runtime.onInstalled.addListener(() => {
     grokKey: '',
     grokModel: 'grok-4',
     memory: 6,
-    systemPrompt: ''
+    systemPrompt: '',
+    // ---------- Smart Helper (all optional, off by default) ----------
+    helperOn: false,          // the master switch
+    helperRoles: false,       // part 1: auto detect brain and worker
+    helperBest: false,        // part 2: pick the best answer card
+    helperStop: false,        // part 3: auto stop when the project is done
+    helperStopEvery: 1,       // part 3: check every N rounds
+    helperMaxCalls: 30,       // safety limit for the whole run
+    goal: ''                  // what the two AIs must finish
   };
 
   function clampInt(value, min, max, fallback) {
@@ -2344,6 +3257,16 @@ chrome.runtime.onInstalled.addListener(() => {
     out.grokKey = cleanString(src.grokKey, '');
     out.grokModel = cleanString(src.grokModel, DEFAULTS.grokModel);
     out.systemPrompt = src.systemPrompt === null || src.systemPrompt === undefined ? '' : String(src.systemPrompt);
+
+    // Smart Helper. Every part is off unless it was switched on.
+    out.helperOn = Boolean(src.helperOn);
+    // A part only counts when the master switch is on too.
+    out.helperRoles = out.helperOn && Boolean(src.helperRoles);
+    out.helperBest = out.helperOn && Boolean(src.helperBest);
+    out.helperStop = out.helperOn && Boolean(src.helperStop);
+    out.helperStopEvery = clampInt(src.helperStopEvery, 1, 20, DEFAULTS.helperStopEvery);
+    out.helperMaxCalls = clampInt(src.helperMaxCalls, 0, 500, DEFAULTS.helperMaxCalls);
+    out.goal = src.goal === null || src.goal === undefined ? '' : String(src.goal);
     return out;
   }
 
@@ -2459,7 +3382,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 <a id="popuphtml"></a>
 
-*185 lines.*
+*239 lines.*
 
 ````html
 <!DOCTYPE html>
@@ -2619,9 +3542,63 @@ chrome.runtime.onInstalled.addListener(() => {
     </div>
   </section>
 
-  <!-- ================= 3. RUN ================= -->
+  <!-- ================= 3. SMART HELPER ================= -->
   <section class="card">
-    <h2><span class="num">3</span> Run</h2>
+    <h2><span class="num">3</span> Smart Helper <em class="tag">optional</em></h2>
+    <p class="hint helper-intro">
+      Three optional helpers that use your Gemini or Grok key. They send chat text to
+      Google or xAI. With the switch off (the default) nothing leaves this computer.
+    </p>
+
+    <label class="check master">
+      <input id="helper-on" type="checkbox">
+      <span><strong>Turn on the Smart Helper</strong> — off by default</span>
+    </label>
+
+    <div id="helper-body" class="helper-body" hidden>
+      <label class="check">
+        <input id="helper-roles" type="checkbox">
+        <span>Auto detect brain and worker</span>
+      </label>
+      <div class="helper-row">
+        <button id="helper-detect" class="ghost small">Auto detect brain and worker</button>
+      </div>
+      <p class="hint" id="helper-detect-result">Not checked yet.</p>
+
+      <label class="check">
+        <input id="helper-best" type="checkbox">
+        <span>Pick the best answer when a chat shows several</span>
+      </label>
+
+      <label class="check">
+        <input id="helper-stop" type="checkbox">
+        <span>Auto stop when the project is done</span>
+      </label>
+
+      <label class="full">Project goal (what the two AIs must finish)
+        <textarea id="goal" rows="2"
+          placeholder="For example: a working to-do app in one HTML file, with add and delete."></textarea>
+      </label>
+
+      <div class="grid2">
+        <label>Check every N rounds
+          <input id="helper-stop-every" type="number" min="1" max="20" step="1">
+        </label>
+        <label>Max helper calls per run
+          <input id="helper-max-calls" type="number" min="0" max="500" step="5">
+        </label>
+      </div>
+
+      <p class="hint">
+        Only the last few messages are sent, never the whole chat. Keys never leave this
+        browser except to the provider you chose.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= 4. RUN ================= -->
+  <section class="card">
+    <h2><span class="num">4</span> Run</h2>
     <div class="run-buttons">
       <button id="start" class="primary">Start</button>
       <button id="stop" class="danger">Stop</button>
@@ -2654,7 +3631,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 <a id="popupjs"></a>
 
-*485 lines.*
+*556 lines.*
 
 ````js
 // popup.js — the popup window. It shows the picks, the settings and the run
@@ -2706,6 +3683,16 @@ const el = {
   grokModel: $('grok-model'),
   memory: $('memory'),
   systemPrompt: $('system-prompt'),
+  helperOn: $('helper-on'),
+  helperBody: $('helper-body'),
+  helperRoles: $('helper-roles'),
+  helperDetect: $('helper-detect'),
+  helperDetectResult: $('helper-detect-result'),
+  helperBest: $('helper-best'),
+  helperStop: $('helper-stop'),
+  goal: $('goal'),
+  helperStopEvery: $('helper-stop-every'),
+  helperMaxCalls: $('helper-max-calls'),
   start: $('start'),
   stop: $('stop'),
   status: $('status'),
@@ -2890,7 +3877,14 @@ function readForm() {
     grokKey: el.grokKey.value,
     grokModel: el.grokModel.value,
     memory: el.memory.value,
-    systemPrompt: el.systemPrompt.value
+    systemPrompt: el.systemPrompt.value,
+    helperOn: el.helperOn.checked,
+    helperRoles: el.helperRoles.checked,
+    helperBest: el.helperBest.checked,
+    helperStop: el.helperStop.checked,
+    goal: el.goal.value,
+    helperStopEvery: el.helperStopEvery.value,
+    helperMaxCalls: el.helperMaxCalls.value
   });
 }
 
@@ -2915,7 +3909,25 @@ function fillForm(value) {
   el.grokModel.value = value.grokModel;
   el.memory.value = value.memory;
   el.systemPrompt.value = value.systemPrompt;
+  el.helperOn.checked = value.helperOn;
+  el.helperRoles.checked = value.helperRoles;
+  el.helperBest.checked = value.helperBest;
+  el.helperStop.checked = value.helperStop;
+  el.goal.value = value.goal;
+  el.helperStopEvery.value = value.helperStopEvery;
+  el.helperMaxCalls.value = value.helperMaxCalls;
+  renderHelper();
   renderModeBadge();
+}
+
+// The helper options only appear when the master switch is on: a beginner
+// should not have to wonder which of these boxes do anything.
+function renderHelper() {
+  const on = el.helperOn.checked;
+  el.helperBody.hidden = !on;
+  el.helperDetect.disabled = !on || !el.helperRoles.checked;
+  el.goal.disabled = !on || !el.helperStop.checked;
+  el.helperStopEvery.disabled = !on || !el.helperStop.checked;
 }
 
 // Save a moment after the user stops typing, so every keystroke is kept but
@@ -2923,6 +3935,7 @@ function fillForm(value) {
 function scheduleSave() {
   settings = readForm();
   renderModeBadge();
+  renderHelper();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     await chrome.storage.local.set({ settings: settings });
@@ -2993,6 +4006,31 @@ async function testPaste() {
     return;
   }
   setTestOutput('Test paste', reply.note || 'The word "test" is in the chat box. It was not sent.', false);
+}
+
+// Smart Helper part 1: ask the background worker which window is the brain.
+// The worker changes the roles; this only shows the result in plain words.
+async function detectRoles() {
+  el.helperDetect.disabled = true;
+  el.helperDetectResult.textContent = 'Thinking about both chats...';
+  await flushSave();
+  const reply = await bgMessage({ type: 'detectRoles' });
+  el.helperDetect.disabled = false;
+  renderHelper();
+  if (reply && reply.error) {
+    el.helperDetectResult.textContent = reply.error;
+    el.helperDetectResult.className = 'hint detect-bad';
+    return;
+  }
+  const message = (reply && reply.message) || 'The roles were set.';
+  el.helperDetectResult.textContent = message;
+  el.helperDetectResult.className = 'hint detect-good';
+  // The worker saved the new roles; show them here too.
+  const stored = await chrome.storage.local.get('roles');
+  if (stored.roles) {
+    state.roles = stored.roles;
+    renderRoles();
+  }
 }
 
 async function clearPicks() {
@@ -3077,6 +4115,9 @@ el.testClose.addEventListener('click', () => { el.testOutput.hidden = true; });
 el.start.addEventListener('click', start);
 el.stop.addEventListener('click', stop);
 el.copyLog.addEventListener('click', copyLog);
+el.helperDetect.addEventListener('click', detectRoles);
+el.helperRoles.addEventListener('change', renderHelper);
+el.helperStop.addEventListener('change', renderHelper);
 el.showReadme.addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('README.html') });
 });
@@ -3085,7 +4126,8 @@ const settingFields = [
   el.rounds, el.silence, el.copyModeA, el.copyModeB, el.markerStart, el.markerEnd,
   el.timeout, el.maxRounds, el.prefix, el.suffix, el.stopIfSame, el.stopWord,
   el.mode, el.provider, el.geminiKey, el.geminiModel, el.grokKey, el.grokModel,
-  el.memory, el.systemPrompt
+  el.memory, el.systemPrompt, el.helperOn, el.helperRoles, el.helperBest,
+  el.helperStop, el.goal, el.helperStopEvery, el.helperMaxCalls
 ];
 for (const field of settingFields) {
   field.addEventListener('input', scheduleSave);
@@ -3126,7 +4168,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 // ---------- start up ----------
 (async function init() {
-  const stored = await chrome.storage.local.get(['settings', 'status', 'log', 'roles', 'run']);
+  const stored = await chrome.storage.local.get(['settings', 'status', 'log', 'roles', 'run', 'helperDetect']);
   settings = Common.normalizeSettings(stored.settings);
   fillForm(settings);
   state.status = stored.status || null;
@@ -3138,6 +4180,12 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
   showStatus(state.status);
   renderLog(state.log);
+  // The last role detection stays visible, so a result is not lost when the
+  // popup closes.
+  if (stored.helperDetect && stored.helperDetect.message) {
+    el.helperDetectResult.textContent = stored.helperDetect.message;
+    el.helperDetectResult.className = 'hint detect-good';
+  }
   await loadCurrentTab();
   renderRoles();
 })();
@@ -3149,7 +4197,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 <a id="popupcss"></a>
 
-*333 lines.*
+*366 lines.*
 
 ````css
 /* popup.css — light, narrow, easy to read. No frameworks. */
@@ -3484,6 +4532,39 @@ footer {
   font-size: 11px;
   padding: 0 4px;
 }
+
+/* ---------- smart helper ---------- */
+.card h2 .tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  background: #eef1f7;
+  border-radius: 20px;
+  padding: 1px 7px;
+  margin-left: 6px;
+  font-style: normal;
+  vertical-align: middle;
+}
+.helper-intro { margin-bottom: 4px; }
+label.check.master {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: #fafbfe;
+  margin: 8px 0;
+}
+.helper-body {
+  border-top: 1px dashed var(--line);
+  margin-top: 6px;
+  padding-top: 4px;
+}
+.helper-body label.check { margin: 7px 0; }
+.helper-row { margin: 2px 0 6px 24px; }
+.helper-row button { width: 100%; }
+
+/* A good or bad result under the detect button. */
+.hint.detect-good { color: var(--green); font-weight: 600; }
+.hint.detect-bad { color: var(--red); font-weight: 600; }
 ````
 
 ---
@@ -3492,7 +4573,7 @@ footer {
 
 <a id="readmehtml"></a>
 
-*184 lines.*
+*213 lines.*
 
 ````html
 <!DOCTYPE html>
@@ -3658,7 +4739,34 @@ footer {
     provider. A provider that hit 429 rests for 60 seconds. The log says which provider
     answered.</p>
 
-  <h2>7. Common problems</h2>
+  <h2>7. Smart Helper (optional)</h2>
+  <p>Three optional helpers that use your Gemini or Grok key with the same automatic
+    fallback. They are <strong>off by default</strong>, and Tab to Tab mode works with no
+    keys at all.</p>
+  <ul>
+    <li><strong>Auto detect brain and worker</strong> — reads the last reply and the last
+      user message of both tabs, asks the API which window plans (the brain) and which one
+      does the work (the worker), then sets the brain as Tab A and the worker as Tab B.
+      The result is shown in plain words. You can always change it by hand with the
+      Make this Tab A / B buttons. If the answer is unclear, nothing is changed.</li>
+    <li><strong>Pick the best answer</strong> — when a chat shows several answer cards for
+      the newest turn, all of them are read and the API picks the best one for your project
+      goal. Only that card is forwarded. With one answer no API call is made.</li>
+    <li><strong>Auto stop when done</strong> — type the project goal. After every round
+      (or every N rounds) the API is asked whether the project is finished. On DONE the loop
+      stops and the reason appears in the status line.</li>
+  </ul>
+  <p><strong>Safety:</strong> a hard limit of helper calls per run (30 by default), only the
+    last few messages are sent, keys never appear in a message or in the log, and a failed
+    helper call is logged while the normal loop carries on. The log names the provider that
+    answered every call.</p>
+  <p style="background:#fff6dd;border:1px solid #f0dca5;border-radius:8px;padding:10px 12px">
+    <strong>Note:</strong> the Smart Helper is the only part of Chat Bridge that sends your
+    chat text to Google or xAI. With the switch off, nothing leaves this computer beyond the
+    API mode requests you already chose to make.
+  </p>
+
+  <h2>8. Common problems</h2>
   <table>
     <tr><th>Message</th><th>What to do</th></tr>
     <tr><td>Chat box not found</td><td>Clear the picks and pick the three spots again.</td></tr>
@@ -3669,11 +4777,13 @@ footer {
     <tr><td>I could not find the START marker</td><td>Tell the AI to wrap its message between your marker words.</td></tr>
     <tr><td>Run was interrupted</td><td>Chrome restarted the extension in the background. Press Start again.</td></tr>
     <tr><td>API key was rejected</td><td>Copy the key again; make sure it belongs to that provider.</td></tr>
+    <tr><td>Smart Helper: no API key is saved</td><td>Add a Gemini or Grok key in Settings, or switch the helper off.</td></tr>
+    <tr><td>Smart Helper: used all its calls</td><td>Raise Max helper calls per run. The normal loop still works.</td></tr>
   </table>
 
   <p style="margin-top:28px;color:#667085;font-size:13px">
-    Nothing is sent anywhere except the API requests you turn on in API mode.
-    All picks and settings live in this browser.
+    Nothing is sent anywhere except the API requests you turn on: API mode, and the
+    Smart Helper when you switch it on. All picks and settings live in this browser.
   </p>
 </main>
 </body>

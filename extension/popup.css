@@ -330,3 +330,36 @@ footer {
   font-size: 11px;
   padding: 0 4px;
 }
+
+/* ---------- smart helper ---------- */
+.card h2 .tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  background: #eef1f7;
+  border-radius: 20px;
+  padding: 1px 7px;
+  margin-left: 6px;
+  font-style: normal;
+  vertical-align: middle;
+}
+.helper-intro { margin-bottom: 4px; }
+label.check.master {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: #fafbfe;
+  margin: 8px 0;
+}
+.helper-body {
+  border-top: 1px dashed var(--line);
+  margin-top: 6px;
+  padding-top: 4px;
+}
+.helper-body label.check { margin: 7px 0; }
+.helper-row { margin: 2px 0 6px 24px; }
+.helper-row button { width: 100%; }
+
+/* A good or bad result under the detect button. */
+.hint.detect-good { color: var(--green); font-weight: 600; }
+.hint.detect-bad { color: var(--red); font-weight: 600; }

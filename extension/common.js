@@ -34,7 +34,15 @@
     grokKey: '',
     grokModel: 'grok-4',
     memory: 6,
-    systemPrompt: ''
+    systemPrompt: '',
+    // ---------- Smart Helper (all optional, off by default) ----------
+    helperOn: false,          // the master switch
+    helperRoles: false,       // part 1: auto detect brain and worker
+    helperBest: false,        // part 2: pick the best answer card
+    helperStop: false,        // part 3: auto stop when the project is done
+    helperStopEvery: 1,       // part 3: check every N rounds
+    helperMaxCalls: 30,       // safety limit for the whole run
+    goal: ''                  // what the two AIs must finish
   };
 
   function clampInt(value, min, max, fallback) {
@@ -73,6 +81,16 @@
     out.grokKey = cleanString(src.grokKey, '');
     out.grokModel = cleanString(src.grokModel, DEFAULTS.grokModel);
     out.systemPrompt = src.systemPrompt === null || src.systemPrompt === undefined ? '' : String(src.systemPrompt);
+
+    // Smart Helper. Every part is off unless it was switched on.
+    out.helperOn = Boolean(src.helperOn);
+    // A part only counts when the master switch is on too.
+    out.helperRoles = out.helperOn && Boolean(src.helperRoles);
+    out.helperBest = out.helperOn && Boolean(src.helperBest);
+    out.helperStop = out.helperOn && Boolean(src.helperStop);
+    out.helperStopEvery = clampInt(src.helperStopEvery, 1, 20, DEFAULTS.helperStopEvery);
+    out.helperMaxCalls = clampInt(src.helperMaxCalls, 0, 500, DEFAULTS.helperMaxCalls);
+    out.goal = src.goal === null || src.goal === undefined ? '' : String(src.goal);
     return out;
   }
 

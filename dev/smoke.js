@@ -86,7 +86,10 @@ try {
   must(typeof sandbox.ChatBridgeCommon.siteKeyFor === 'function', 'common.js did not load in the worker');
   must(typeof sandbox.ChatBridgeExtract.betweenMarkers === 'function', 'extract.js did not load in the worker');
   must(typeof sandbox.ChatBridgeApi.requestWithFallback === 'function', 'api-client.js did not load in the worker');
-  notes.push('background.js loads its three helper files and starts');
+  must(typeof sandbox.ChatBridgeHelper.shouldStop === 'function', 'helper.js did not load in the worker');
+  // The Smart Helper must be off unless someone switches it on.
+  must(sandbox.ChatBridgeCommon.DEFAULTS.helperOn === false, 'the Smart Helper must be off by default');
+  notes.push('background.js loads its four helper files and starts');
 } catch (err) {
   problems.push('background.js failed to load: ' + err.message);
 }
