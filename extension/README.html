@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Chat Bridge — How to use</title>
+  <style>
+    :root {
+      --blue: #2f6fed;
+      --ink: #1b2233;
+      --muted: #667085;
+      --line: #e4e7ee;
+      --red: #c0392b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 28px 18px 60px;
+      background: #f4f6fa;
+      color: var(--ink);
+      font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 26px 30px 34px;
+    }
+    h1 { margin: 0 0 4px; font-size: 26px; }
+    .sub { margin: 0 0 22px; color: var(--muted); }
+    h2 {
+      margin: 30px 0 8px;
+      font-size: 18px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--line);
+    }
+    h3 { margin: 20px 0 6px; font-size: 15px; }
+    ol, ul { padding-left: 22px; }
+    li { margin: 5px 0; }
+    code {
+      background: #eef2f9;
+      border-radius: 4px;
+      padding: 1px 5px;
+      font: 13px Menlo, Consolas, monospace;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
+    th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .note {
+      background: #eef4ff;
+      border: 1px solid #cddaf7;
+      border-radius: 8px;
+      padding: 11px 14px;
+      margin: 14px 0;
+    }
+    .warn {
+      background: #fdf2f0;
+      border: 1px solid #f0cdc7;
+      border-radius: 8px;
+      padding: 11px 14px;
+      margin: 14px 0;
+    }
+    .kbd {
+      display: inline-block;
+      border: 1px solid #c8cfdd;
+      border-bottom-width: 2px;
+      border-radius: 5px;
+      padding: 0 6px;
+      font: 12px Menlo, Consolas, monospace;
+      background: #fafbfe;
+    }
+    a { color: var(--blue); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Chat Bridge</h1>
+  <p class="sub">Make two AI chats talk to each other, automatically.</p>
+
+  <div class="note">
+    <strong>The one-minute version.</strong> Pick the chat box, the send button and the AI
+    reply in each tab, press <em>Make this Tab A</em> / <em>Make this Tab B</em>, choose how
+    many rounds, press <strong>Start</strong>.
+  </div>
+
+  <h2>1. Pick the three spots</h2>
+  <ol>
+    <li>Click the Chat Bridge icon while the chat tab is active.</li>
+    <li>Press <strong>Pick chat box</strong>, then click inside the page's message box.</li>
+    <li>Press <strong>Pick send button</strong>, then click the send arrow.</li>
+    <li>Press <strong>Pick AI reply</strong>, then click the AI's answer. Press
+      <span class="kbd">↑</span> once or twice so the blue box covers the whole answer,
+      then click.</li>
+    <li>Press <strong>Test copy</strong>: the first 200 characters of the newest answer
+      should appear. Press <strong>Test paste</strong>: the word <code>test</code> appears
+      in the chat box and is not sent.</li>
+  </ol>
+  <p>While picking, the page shows a toast with the keys:</p>
+  <ul>
+    <li><span class="kbd">↑</span> bigger area (the parent element)</li>
+    <li><span class="kbd">↓</span> back again</li>
+    <li><strong>click</strong> to save</li>
+    <li><span class="kbd">Esc</span> to cancel</li>
+  </ul>
+  <p>Picks are saved per site <em>and</em> per first path part, so
+    <code>arena.ai/c</code> and <code>arena.ai/agent</code> keep their own picks.</p>
+
+  <h2>2. Choose the tabs</h2>
+  <ol>
+    <li>In the first chat tab, open the popup and press <strong>Make this Tab A</strong>.</li>
+    <li>Open the second chat tab and press <strong>Make this Tab B</strong>.</li>
+  </ol>
+  <p>The popup only ever talks about the tab that is active when you open it. The same tab
+    cannot be both A and B.</p>
+
+  <div class="note">
+    <strong>Best results:</strong> put the two chat tabs in <strong>two separate Chrome
+    windows</strong> side by side. Chrome slows down tabs it cannot see, and some sites
+    refuse pasted text in a tab that is not being looked at.
+  </div>
+
+  <h2>3. Copy modes</h2>
+  <table>
+    <tr><th>Mode</th><th>What is forwarded</th></tr>
+    <tr><td>Full reply</td><td>The whole answer.</td></tr>
+    <tr><td>Last code block</td><td>The newest <code>&lt;pre&gt;&lt;code&gt;</code> block only.</td></tr>
+    <tr><td>Between markers</td><td>Only the text between <em>START</em> and <em>END</em>. This is the best way to keep two AIs on topic.</td></tr>
+  </table>
+  <p><strong>Prefix</strong> and <strong>suffix</strong> are added around every forwarded
+    message. Example prefix: <code>Here is the other AI's answer. Improve it.</code></p>
+
+  <h2>4. Waiting until the AI is finished</h2>
+  <p>Chat Bridge reads the newest answer once a second. The answer counts as started when
+    the text (or the number of replies) changes, and as finished when it has not changed for
+    the <strong>seconds of silence</strong> you set.</p>
+  <div class="warn">
+    <strong>Arena agent pages:</strong> set <strong>seconds of silence</strong> to
+    <strong>20–30</strong>. Agents go quiet while they run tools, and a low value would
+    forward a half-finished answer.
+  </div>
+
+  <h2>5. Safety options</h2>
+  <ul>
+    <li><strong>Max rounds safety limit</strong> — a hard cap (default 100).</li>
+    <li><strong>Stop if the new reply is identical to the previous one</strong> — catches
+      two AIs repeating the same sentence.</li>
+    <li><strong>Stop when the reply contains</strong> — for example <code>DONE</code>.</li>
+    <li><strong>Stop</strong> — stops immediately, also in the middle of a wait.</li>
+  </ul>
+
+  <h2>6. API mode (optional)</h2>
+  <p>Instead of a second chat tab, one side can be Google Gemini or xAI Grok.</p>
+  <ol>
+    <li>Settings → Mode → <em>Tab and API</em>.</li>
+    <li>Paste the Gemini and/or Grok API key. They are stored only in this browser.</li>
+    <li>Choose the main provider. The other one becomes the automatic backup.</li>
+  </ol>
+  <p>On a rate limit (HTTP 429), a rejected key, a server error, a network problem or an
+    empty answer, Chat Bridge retries once after 2 seconds and then switches to the backup
+    provider. A provider that hit 429 rests for 60 seconds. The log says which provider
+    answered.</p>
+
+  <h2>7. Common problems</h2>
+  <table>
+    <tr><th>Message</th><th>What to do</th></tr>
+    <tr><td>Chat box not found</td><td>Clear the picks and pick the three spots again.</td></tr>
+    <tr><td>The chat box stayed empty after pasting</td><td>Click directly inside the message box when picking.</td></tr>
+    <tr><td>Timed out waiting for Tab B</td><td>Use two Chrome windows, raise seconds of silence, raise the timeout.</td></tr>
+    <tr><td>The answer is cut in half</td><td>Re-pick the AI reply and press ↑ so the whole answer is covered.</td></tr>
+    <tr><td>No code block found</td><td>The answer has no code. Change the copy mode.</td></tr>
+    <tr><td>I could not find the START marker</td><td>Tell the AI to wrap its message between your marker words.</td></tr>
+    <tr><td>Run was interrupted</td><td>Chrome restarted the extension in the background. Press Start again.</td></tr>
+    <tr><td>API key was rejected</td><td>Copy the key again; make sure it belongs to that provider.</td></tr>
+  </table>
+
+  <p style="margin-top:28px;color:#667085;font-size:13px">
+    Nothing is sent anywhere except the API requests you turn on in API mode.
+    All picks and settings live in this browser.
+  </p>
+</main>
+</body>
+</html>

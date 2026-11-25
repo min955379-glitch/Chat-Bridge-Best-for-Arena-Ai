@@ -1,0 +1,14 @@
+{
+  "name": "chat-bridge-dev-tests",
+  "private": true,
+  "description": "Test harness for the Chat Bridge extension. The extension itself needs no npm packages.",
+  "scripts": {
+    "test": "node --test dev/tests/*.test.js",
+    "test:fast": "node --test dev/tests/selectors.test.js dev/tests/extract.test.js dev/tests/common.test.js dev/tests/api-client.test.js dev/tests/content.test.js dev/tests/picker.test.js dev/tests/popup.test.js",
+    "smoke": "node dev/smoke.js",
+    "check": "node dev/smoke.js && node --test dev/tests/*.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  }
+}
